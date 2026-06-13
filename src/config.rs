@@ -81,4 +81,46 @@ pub struct Config {
     /// Prefill step size for mlx_lm.server prompt processing
     #[arg(long, env = "PREFILL_STEP_SIZE", default_value_t = 4096)]
     pub prefill_step_size: u32,
+
+    // ── Agentic RAG (disabled by default; enabling adds an internal `retrieve` tool) ──
+
+    /// Enable Agentic RAG (proxy intercepts a built-in `retrieve` tool and runs retrieval internally)
+    #[arg(long, env = "RAG_ENABLED", default_value_t = false)]
+    pub rag_enabled: bool,
+
+    /// Qdrant base URL (REST API)
+    #[arg(long, env = "QDRANT_URL", default_value = "http://127.0.0.1:6333")]
+    pub qdrant_url: String,
+
+    /// Qdrant collection name
+    #[arg(long, env = "QDRANT_COLLECTION", default_value = "praxis_rag")]
+    pub qdrant_collection: String,
+
+    /// Embedding service base URL (OpenAI-compatible `/v1/embeddings`)
+    #[arg(long, env = "EMBED_URL", default_value = "http://127.0.0.1:1234")]
+    pub embed_url: String,
+
+    /// Embedding model name passed to the embedding service
+    #[arg(long, env = "EMBED_MODEL", default_value = "text-embedding")]
+    pub embed_model: String,
+
+    /// Embedding vector dimension (must match the embedding model's output)
+    #[arg(long, env = "EMBED_DIM", default_value_t = 1024)]
+    pub embed_dim: u64,
+
+    /// Number of chunks returned per retrieval
+    #[arg(long, env = "RAG_TOP_K", default_value_t = 5)]
+    pub rag_top_k: u64,
+
+    /// Max internal retrieval rounds per request (loop guard)
+    #[arg(long, env = "RAG_MAX_ROUNDS", default_value_t = 3)]
+    pub rag_max_rounds: u32,
+
+    /// Chunk size in characters when ingesting documents
+    #[arg(long, env = "RAG_CHUNK_SIZE", default_value_t = 800)]
+    pub rag_chunk_size: usize,
+
+    /// Chunk overlap in characters when ingesting documents
+    #[arg(long, env = "RAG_CHUNK_OVERLAP", default_value_t = 100)]
+    pub rag_chunk_overlap: usize,
 }

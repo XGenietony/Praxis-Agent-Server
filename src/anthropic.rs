@@ -21,6 +21,116 @@ fn anthropic_error(status: StatusCode, error_type: &str, message: &str) -> Respo
     }))).into_response()
 }
 
+// ─── Agentic RAG ──────────────────────────────────────────────────────────────
+
+/// Extract `(name, arguments_json_string)` pairs from a transformed OpenAI
+/// response (`choices[0].message.tool_calls`).
+fn extract_tool_calls(resp: &Value) -> Vec<(String, String)> {
+    resp.get("choices")
+        .and_then(|c| c.as_array())
+        .and_then(|c| c.first())
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("tool_calls"))
+        .and_then(|t| t.as_array())
+        .map(|calls| {
+            calls
+                .iter()
+                .filter_map(|tc| {
+                    let f = tc.get("function")?;
+                    let name = f.get("name")?.as_str()?.to_string();
+                    let args = f.get("arguments").and_then(|a| a.as_str()).unwrap_or("{}").to_string();
+                    Some((name, args))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Send `body` to the backend once (non-streaming) and return the
+/// tool-call-parsed response bytes.
+async fn backend_once(state: &AppState, url: &str, body: &Value) -> Result<Bytes, String> {
+    let mut probe = body.clone();
+    probe["stream"] = json!(true);
+    probe["stream_options"] = json!({"include_usage": true});
+    let bytes = serde_json::to_vec(&probe).map_err(|e| e.to_string())?;
+    let resp = state
+        .http_client
+        .post(url)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "text/event-stream")
+        .body(bytes)
+        .send()
+        .await
+        .map_err(|e| format!("backend connect failed: {}", e))?;
+    let collected = crate::stream::collect_stream_to_response(resp).await;
+    Ok(crate::tools::transform_response(collected))
+}
+
+/// Run internal retrieve rounds. Returns the augmented body (messages include
+/// all retrieved context) and the final collected response bytes from the round
+/// where the model chose to answer (or the forced answer after max rounds).
+async fn resolve_rag_rounds(
+    state: &AppState,
+    url: &str,
+    rag: &crate::rag::RagClient,
+    mut body: Value,
+    max_rounds: u32,
+) -> Result<(Value, Bytes), String> {
+    for round in 0..max_rounds.max(1) {
+        let resp_bytes = backend_once(state, url, &body).await?;
+        let resp: Value = serde_json::from_slice(&resp_bytes).map_err(|e| e.to_string())?;
+        let calls = extract_tool_calls(&resp);
+
+        let only_retrieve = !calls.is_empty()
+            && calls.iter().all(|(name, _)| name == crate::rag::RETRIEVE_TOOL_NAME);
+        if !only_retrieve {
+            // Final answer (text or a client-handled tool call).
+            return Ok((body, resp_bytes));
+        }
+
+        // Consume each retrieve call: search and append context to the conversation.
+        for (_, args) in &calls {
+            let query = serde_json::from_str::<Value>(args)
+                .ok()
+                .and_then(|v| v.get("query").and_then(|q| q.as_str()).map(String::from))
+                .unwrap_or_default();
+            if query.is_empty() {
+                continue;
+            }
+            let chunks = match rag.search(&query).await {
+                Ok(c) => c,
+                Err(e) => {
+                    error!("RAG search failed for query '{}': {}", query, e);
+                    vec![]
+                }
+            };
+            info!("RAG round {}: query='{}' hits={}", round + 1, query, chunks.len());
+            let result = crate::rag::format_chunks(&chunks);
+            if let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
+                messages.push(json!({
+                    "role": "assistant",
+                    "content": crate::rag::retrieve_call_text(&query)
+                }));
+                messages.push(json!({
+                    "role": "user",
+                    "content": format!("[retrieve result]\n{}", result)
+                }));
+            }
+        }
+    }
+
+    // Max rounds hit: force a direct answer.
+    if let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
+        messages.push(json!({
+            "role": "user",
+            "content": "You have gathered enough context. Answer the question now using the \
+                information above. Do not call the retrieve tool again."
+        }));
+    }
+    let final_bytes = backend_once(state, url, &body).await?;
+    Ok((body, final_bytes))
+}
+
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Default)]
@@ -321,6 +431,16 @@ pub async fn forward_anthropic_messages(
     // Convert Anthropic → OpenAI
     let mut openai_body = crate::tools::anthropic_request_to_openai(&anthropic_req);
 
+    // Agentic RAG: inject the built-in `retrieve` tool so the model can request retrieval.
+    let rag_active = state.rag.is_some();
+    if rag_active {
+        let retrieve = crate::rag::retrieve_tool_openai();
+        match openai_body.get_mut("tools").and_then(|t| t.as_array_mut()) {
+            Some(tools) => tools.push(retrieve),
+            None => openai_body["tools"] = json!([retrieve]),
+        }
+    }
+
     // Tool adaptation for local model
     let has_tools = crate::tools::transform_request(&mut openai_body);
     if has_tools { info!("Anthropic tool adaptation applied"); }
@@ -357,6 +477,32 @@ pub async fn forward_anthropic_messages(
     }
 
     let url = format!("http://127.0.0.1:{}/v1/chat/completions", state.config.backend_port);
+
+    // Agentic RAG: consume internal `retrieve` rounds before responding to the client.
+    if let Some(rag) = state.rag.clone() {
+        match resolve_rag_rounds(&state, &url, &rag, openai_body.clone(), state.config.rag_max_rounds).await {
+            Ok((augmented_body, final_bytes)) => {
+                openai_body = augmented_body;
+                if !is_stream {
+                    // Reuse the already-collected final answer; no extra generation.
+                    let resp_body: Value = match serde_json::from_slice(&final_bytes) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            error!("Invalid response: {}", e);
+                            return anthropic_error(StatusCode::INTERNAL_SERVER_ERROR, "api_error", &format!("{}", e));
+                        }
+                    };
+                    info!("{} Anthropic non-stream (RAG) completed in {:?}", client_ip, start.elapsed());
+                    return Json(openai_to_anthropic(resp_body, &model)).into_response();
+                }
+                // Stream branch falls through with the context-augmented body.
+            }
+            Err(e) => {
+                error!("RAG loop failed: {}", e);
+                return anthropic_error(StatusCode::BAD_GATEWAY, "api_error", &format!("RAG loop failed: {}", e));
+            }
+        }
+    }
 
     if is_stream {
         openai_body["stream"] = json!(true);

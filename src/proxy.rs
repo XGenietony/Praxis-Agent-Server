@@ -1,10 +1,12 @@
 use axum::http::{HeaderMap, StatusCode};
 use crate::config::Config;
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct AppState {
     pub config: Config,
     pub http_client: reqwest::Client,
+    pub rag: Option<Arc<crate::rag::RagClient>>,
 }
 
 pub fn get_client_ip(headers: &HeaderMap, remote_addr: Option<std::net::SocketAddr>) -> String {
