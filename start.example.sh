@@ -21,14 +21,16 @@
 
 cd "$(dirname "$0")"
 
+# Build first if needed: go build -o lmstudio-forward .
+
 # --- GGUF example ---
-RUST_LOG=info exec ./target/release/lmstudio-forward \
+exec ./lmstudio-forward \
   --gguf-model "${GGUF_MODEL_PATH:-/path/to/your/model.gguf}" \
   --ctx-size 32768 \
   --no-frpc
 
 # --- MLX example (uncomment and remove GGUF block above) ---
-# RUST_LOG=info exec ./target/release/lmstudio-forward \
+# exec ./lmstudio-forward \
 #   --mlx-model "${MLX_MODEL_PATH:-/path/to/your/mlx-model-dir}" \
 #   --python-path "$(pwd)/.venv/bin/python3" \
 #   --ctx-size 32768 \

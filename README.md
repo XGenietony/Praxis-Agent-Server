@@ -1,6 +1,6 @@
 # lmstudio-forward
 
-A lightweight Rust proxy that exposes a local LLM (GGUF via llama-server, or MLX via mlx_lm.server) as a unified API endpoint, with optional public tunnel via frpc.
+A lightweight Go proxy that exposes a local LLM (GGUF via llama-server, or MLX via mlx_lm.server) as a unified API endpoint, with optional public tunnel via frpc.
 
 ## What it does
 
@@ -11,7 +11,7 @@ A lightweight Rust proxy that exposes a local LLM (GGUF via llama-server, or MLX
 
 ## Requirements
 
-- Rust (for building)
+- Go 1.23+ (for building; no third-party dependencies — stdlib only)
 - One of:
   - **GGUF**: [llama-server](https://github.com/ggerganov/llama.cpp) (`brew install llama.cpp`)
   - **MLX**: Python venv with `mlx-lm` installed
@@ -20,10 +20,16 @@ A lightweight Rust proxy that exposes a local LLM (GGUF via llama-server, or MLX
 ## Build
 
 ```bash
-cargo build --release
+go build -o lmstudio-forward .
 ```
 
-The binary is output to `./target/release/lmstudio-forward`.
+The binary is output to `./lmstudio-forward`.
+
+Run the tests with:
+
+```bash
+go test ./...
+```
 
 ## Quick start
 
