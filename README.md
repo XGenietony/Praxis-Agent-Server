@@ -20,7 +20,7 @@ A lightweight Go proxy that exposes a local LLM (GGUF via llama-server, or MLX v
 ## Build
 
 ```bash
-go build -o lmstudio-forward .
+go build -o lmstudio-forward ./cmd/lmstudio-forward
 ```
 
 The binary is output to `./lmstudio-forward`.
@@ -29,6 +29,27 @@ Run the tests with:
 
 ```bash
 go test ./...
+```
+
+## Project layout
+
+Standard Go layout — `cmd/` holds the entrypoint (bootstrap + dependency
+injection only); all behavior lives in `internal/`:
+
+```
+cmd/lmstudio-forward/   application entrypoint (wiring only)
+internal/
+  config/      configuration: flags, env, defaults
+  jsonx/       dynamic-JSON helper layer (serde_json::Value equivalent)
+  language/    token estimation, context truncation, complexity scoring
+  tools/       tool-call adaptation + <tool_call> parsing (batch & streaming)
+  rag/         Agentic RAG: Qdrant client, chunking, retrieve tool
+  stream/      SSE collection + response headers
+  proxy/       shared app state, client-IP + API-key helpers
+  openai/      OpenAI-compatible forwarding handler
+  anthropic/   Anthropic Messages handler + protocol conversion
+  process/     backend (llama-server/mlx) + frpc process supervision
+  server/      route wiring, health + RAG-ingest handlers
 ```
 
 ## Quick start

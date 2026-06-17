@@ -1,25 +1,29 @@
-package main
+// Package proxy holds the shared application state and request-level helpers
+// (client IP extraction, API-key auth) used across all HTTP handlers.
+package proxy
 
 import (
 	"net"
 	"net/http"
 	"strings"
+
+	"lmstudio-forward/internal/config"
+	"lmstudio-forward/internal/rag"
 )
 
 // AppState holds the shared dependencies passed to every HTTP handler.
 // Mirrors Rust's `proxy::AppState`.
 type AppState struct {
-	Config     Config
+	Config     config.Config
 	HTTPClient *http.Client
-	Rag        *RagClient // nil when RAG disabled (RagClient defined in rag.go)
+	Rag        *rag.Client // nil when RAG disabled
 }
 
-// getClientIP extracts the originating client IP from a request.
-// It prefers the first segment of the X-Forwarded-For header, falling back to
-// the host portion of r.RemoteAddr, then "unknown".
-func getClientIP(r *http.Request) string {
+// GetClientIP extracts the originating client IP from a request. It prefers the
+// first segment of the X-Forwarded-For header, falling back to the host portion
+// of r.RemoteAddr, then "unknown".
+func GetClientIP(r *http.Request) string {
 	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-		// split on ',', take the first segment, trim whitespace.
 		first := forwarded
 		if idx := strings.IndexByte(forwarded, ','); idx >= 0 {
 			first = forwarded[:idx]
@@ -35,10 +39,10 @@ func getClientIP(r *http.Request) string {
 	return "unknown"
 }
 
-// checkAPIKey reports whether the request is authorized.
-// An empty expectedKey disables auth (always authorized). Otherwise the request
-// must carry either "Authorization: Bearer <key>" or "x-api-key: <key>".
-func checkAPIKey(r *http.Request, expectedKey string) bool {
+// CheckAPIKey reports whether the request is authorized. An empty expectedKey
+// disables auth (always authorized). Otherwise the request must carry either
+// "Authorization: Bearer <key>" or "x-api-key: <key>".
+func CheckAPIKey(r *http.Request, expectedKey string) bool {
 	if expectedKey == "" {
 		return true
 	}

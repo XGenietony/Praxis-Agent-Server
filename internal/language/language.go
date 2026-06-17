@@ -1,14 +1,18 @@
-package main
+// Package language provides token estimation, context-window truncation, and
+// conversation-complexity scoring used to drive dynamic thinking control.
+package language
 
 import (
 	"log"
 	"strings"
+
+	"lmstudio-forward/internal/jsonx"
 )
 
-// estimateTokens gives a rough estimate of the token count for a string.
+// EstimateTokens gives a rough estimate of the token count for a string.
 // Chinese (CJK) chars count as ~1 token each; non-CJK chars as ~1 token per 4.
 // Mirrors the Rust `estimate_tokens`.
-func estimateTokens(text string) int {
+func EstimateTokens(text string) int {
 	chars := 0
 	cjk := 0
 	for _, c := range text {
@@ -20,15 +24,15 @@ func estimateTokens(text string) int {
 	return cjk + (chars-cjk)/4 + 1
 }
 
-// truncateMessages trims the messages array to fit within maxTokens.
-// It keeps leading system message(s) plus the trailing messages that fit,
-// reserving 2048 tokens for model output. Returns a (possibly new) slice;
-// Go can't reassign the caller's variable, so callers do:
+// TruncateMessages trims the messages array to fit within maxTokens. It keeps
+// leading system message(s) plus the trailing messages that fit, reserving 2048
+// tokens for model output. Returns a (possibly new) slice; Go can't reassign the
+// caller's variable, so callers do:
 //
-//	body["messages"] = truncateMessages(getArr(body, "messages"), ctx)
+//	body["messages"] = language.TruncateMessages(jsonx.GetArr(body, "messages"), ctx)
 //
 // Mirrors the Rust `truncate_messages`.
-func truncateMessages(messages []any, maxTokens int) []any {
+func TruncateMessages(messages []any, maxTokens int) []any {
 	if len(messages) == 0 || maxTokens == 0 {
 		return messages
 	}
@@ -42,8 +46,8 @@ func truncateMessages(messages []any, maxTokens int) []any {
 	// Calculate tokens for each message.
 	msgTokens := make([]int, len(messages))
 	for i, m := range messages {
-		content := getStr(m, "content")
-		msgTokens[i] = estimateTokens(content) + 4 // overhead for role, formatting
+		content := jsonx.GetStr(m, "content")
+		msgTokens[i] = EstimateTokens(content) + 4 // overhead for role, formatting
 	}
 
 	total := 0
@@ -58,7 +62,7 @@ func truncateMessages(messages []any, maxTokens int) []any {
 	systemEnd := 0
 	systemTokens := 0
 	for i, m := range messages {
-		if getStr(m, "role") == "system" {
+		if jsonx.GetStr(m, "role") == "system" {
 			systemEnd = i + 1
 			systemTokens += msgTokens[i]
 		} else {
@@ -108,16 +112,15 @@ func truncateMessages(messages []any, maxTokens int) []any {
 	return kept
 }
 
-// estimateComplexity scores the conversation and returns true when it is
-// complex enough to warrant deep reasoning (score >= 3).
-// Mirrors the Rust `estimate_complexity`.
-func estimateComplexity(messages []any) bool {
+// EstimateComplexity scores the conversation and returns true when it is complex
+// enough to warrant deep reasoning (score >= 3). Mirrors `estimate_complexity`.
+func EstimateComplexity(messages []any) bool {
 	var userMessages []string
 	for _, m := range messages {
-		if getStr(m, "role") != "user" {
+		if jsonx.GetStr(m, "role") != "user" {
 			continue
 		}
-		if s, ok := asStr(get(m, "content")); ok {
+		if s, ok := jsonx.AsStr(jsonx.Get(m, "content")); ok {
 			userMessages = append(userMessages, s)
 		}
 	}
@@ -129,7 +132,7 @@ func estimateComplexity(messages []any) bool {
 
 	var contentParts []string
 	for _, m := range messages {
-		if s, ok := asStr(get(m, "content")); ok {
+		if s, ok := jsonx.AsStr(jsonx.Get(m, "content")); ok {
 			contentParts = append(contentParts, s)
 		}
 	}
@@ -199,10 +202,10 @@ func estimateComplexity(messages []any) bool {
 	// 7. System prompt length.
 	systemLen := 0
 	for _, m := range messages {
-		if getStr(m, "role") != "system" {
+		if jsonx.GetStr(m, "role") != "system" {
 			continue
 		}
-		if s, ok := asStr(get(m, "content")); ok {
+		if s, ok := jsonx.AsStr(jsonx.Get(m, "content")); ok {
 			systemLen += len(s)
 		}
 	}

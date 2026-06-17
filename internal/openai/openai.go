@@ -1,7 +1,6 @@
-package main
-
-// OpenAI-compatible forwarding handler.
-// All model names are accepted — requests go straight to backend.
+// Package openai implements the OpenAI-compatible forwarding handler.
+// All model names are accepted — requests go straight to the backend.
+package openai
 
 import (
 	"bytes"
@@ -10,23 +9,35 @@ import (
 	"log"
 	"net/http"
 	"strings"
+
+	"lmstudio-forward/internal/jsonx"
+	"lmstudio-forward/internal/language"
+	"lmstudio-forward/internal/proxy"
 )
 
-// LocalModelAlias is the model alias for non-MLX backends
-// (llama-server doesn't care about the model name).
-const LocalModelAlias = "gemma4"
+// Handler serves the OpenAI-compatible endpoints, holding a reference to the
+// shared application state.
+type Handler struct {
+	State *proxy.AppState
+}
 
-// handleOpenAI forwards an OpenAI-compatible request to the local backend,
-// rewriting the model name and injecting dynamic thinking/sampling controls
-// for chat completions, then streams the backend response back transparently.
-func (s *AppState) handleOpenAI(w http.ResponseWriter, r *http.Request) {
-	if !checkAPIKey(r, s.Config.APIKey) {
+// NewHandler wires a Handler to the shared application state.
+func NewHandler(state *proxy.AppState) *Handler {
+	return &Handler{State: state}
+}
+
+// Forward forwards an OpenAI-compatible request to the local backend, rewriting
+// the model name and injecting dynamic thinking/sampling controls for chat
+// completions, then streams the backend response back transparently.
+func (h *Handler) Forward(w http.ResponseWriter, r *http.Request) {
+	s := h.State
+	if !proxy.CheckAPIKey(r, s.Config.APIKey) {
 		w.WriteHeader(http.StatusUnauthorized)
 		w.Write([]byte("Invalid API key"))
 		return
 	}
 
-	clientIP := getClientIP(r)
+	clientIP := proxy.GetClientIP(r)
 	path := strings.TrimPrefix(r.URL.Path, "/v1/")
 	method := r.Method
 
@@ -44,21 +55,21 @@ func (s *AppState) handleOpenAI(w http.ResponseWriter, r *http.Request) {
 	// Rewrite model name + inject dynamic thinking control.
 	requestBody := bodyBytes
 	if len(bodyBytes) > 0 {
-		if parsed, perr := parseJSON(bodyBytes); perr == nil {
-			if data := asObj(parsed); data != nil {
+		if parsed, perr := jsonx.Parse(bodyBytes); perr == nil {
+			if data := jsonx.AsObj(parsed); data != nil {
 				// Rewrite model name.
-				if has(data, "model") {
+				if jsonx.Has(data, "model") {
 					data["model"] = s.Config.BackendModel()
 				}
 
 				// Dynamic thinking control for chat completions.
 				if strings.HasPrefix(path, "chat/completions") {
 					// Truncate messages to fit ctx_size.
-					if msgs := getArr(data, "messages"); msgs != nil {
-						truncated := truncateMessages(msgs, s.Config.CtxSize)
+					if msgs := jsonx.GetArr(data, "messages"); msgs != nil {
+						truncated := language.TruncateMessages(msgs, s.Config.CtxSize)
 						data["messages"] = truncated
 
-						needsThinking := estimateComplexity(truncated)
+						needsThinking := language.EstimateComplexity(truncated)
 						log.Printf("INFO thinking: needs=%v", needsThinking)
 
 						if !needsThinking {
@@ -68,13 +79,13 @@ func (s *AppState) handleOpenAI(w http.ResponseWriter, r *http.Request) {
 					}
 
 					// Inject sampling defaults if not set by client.
-					if !has(data, "repetition_penalty") && s.Config.RepetitionPenalty > 1.0 {
+					if !jsonx.Has(data, "repetition_penalty") && s.Config.RepetitionPenalty > 1.0 {
 						data["repetition_penalty"] = s.Config.RepetitionPenalty
 						data["repetition_context_size"] = s.Config.RepetitionContextSize
 					}
 				}
 
-				requestBody = toJSON(data)
+				requestBody = jsonx.Marshal(data)
 			}
 		}
 	}
@@ -133,9 +144,10 @@ func (s *AppState) handleOpenAI(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleListModels returns the advertised Claude model names.
-func (s *AppState) handleListModels(w http.ResponseWriter, r *http.Request) {
-	if !checkAPIKey(r, s.Config.APIKey) {
+// ListModels returns the advertised Claude model names.
+func (h *Handler) ListModels(w http.ResponseWriter, r *http.Request) {
+	s := h.State
+	if !proxy.CheckAPIKey(r, s.Config.APIKey) {
 		w.WriteHeader(http.StatusUnauthorized)
 		w.Write([]byte("Invalid API key"))
 		return
@@ -153,5 +165,5 @@ func (s *AppState) handleListModels(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	w.Write(toJSON(models))
+	w.Write(jsonx.Marshal(models))
 }

@@ -1,4 +1,6 @@
-package main
+// Package config holds all runtime configuration for the proxy server and the
+// logic to resolve it from defaults, environment variables, and CLI flags.
+package config
 
 import (
 	"flag"
@@ -7,9 +9,16 @@ import (
 	"strconv"
 )
 
-// Config holds all runtime configuration for the proxy server. It mirrors the
-// Rust `Config` struct (clap-derived) in src/config.rs. Values are resolved
-// with the precedence: hard-coded default < environment variable < CLI flag.
+// LocalModelAlias is the model alias reported to non-MLX backends (llama-server
+// does not care about the model name). It lives here so both the config layer
+// (Config.BackendModel) and the OpenAI handler can reference it without an
+// import cycle.
+const LocalModelAlias = "gemma4"
+
+// Config mirrors the Rust `Config` struct (clap-derived) in src/config.rs.
+// Values are resolved with the precedence:
+//
+//	hard-coded default < environment variable < CLI flag.
 type Config struct {
 	BackendPort           int
 	ServerPort            int
@@ -84,10 +93,10 @@ func envBool(key string, def bool) bool {
 	return def
 }
 
-// parseConfig builds a Config from defaults, environment variables, and CLI
-// flags (in increasing order of precedence). Env names and defaults match the
-// clap derivation in src/config.rs exactly; flags use kebab-case.
-func parseConfig() Config {
+// Parse builds a Config from defaults, environment variables, and CLI flags (in
+// increasing order of precedence). Env names and defaults match the clap
+// derivation in src/config.rs exactly; flags use kebab-case.
+func Parse() Config {
 	var c Config
 
 	flag.IntVar(&c.BackendPort, "backend-port", envInt("BACKEND_PORT", 1234), "LM Studio backend port")
@@ -138,6 +147,9 @@ func canonicalizePath(p string) string {
 	}
 	return resolved
 }
+
+// CanonicalizePath is exported for reuse by the process layer.
+func CanonicalizePath(p string) string { return canonicalizePath(p) }
 
 // BackendModel returns the model identifier reported to the backend. When an
 // MLX model directory is configured it returns its canonicalized path;

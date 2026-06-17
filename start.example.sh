@@ -21,7 +21,7 @@
 
 cd "$(dirname "$0")"
 
-# Build first if needed: go build -o lmstudio-forward .
+# Build first if needed: go build -o lmstudio-forward ./cmd/lmstudio-forward
 
 # --- GGUF example ---
 exec ./lmstudio-forward \

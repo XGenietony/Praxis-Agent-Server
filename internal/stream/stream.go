@@ -1,4 +1,6 @@
-package main
+// Package stream reconstructs OpenAI chat-completion JSON from an SSE byte
+// stream and sets the standard SSE response headers.
+package stream
 
 import (
 	"bufio"
@@ -6,11 +8,13 @@ import (
 	"log"
 	"net/http"
 	"strings"
+
+	"lmstudio-forward/internal/jsonx"
 )
 
-// collectStreamToResponse consumes an SSE stream and reconstructs a complete
-// OpenAI chat.completion JSON, returning the marshaled bytes.
-func collectStreamToResponse(body io.Reader) []byte {
+// CollectToResponse consumes an SSE stream and reconstructs a complete OpenAI
+// chat.completion JSON, returning the marshaled bytes.
+func CollectToResponse(body io.Reader) []byte {
 	var content strings.Builder
 	var reasoning strings.Builder
 	id := ""
@@ -32,29 +36,29 @@ outer:
 					break outer
 				}
 
-				if v, perr := parseJSON([]byte(payload)); perr == nil {
+				if v, perr := jsonx.Parse([]byte(payload)); perr == nil {
 					if id == "" {
-						if i, ok := asStr(get(v, "id")); ok {
+						if i, ok := jsonx.AsStr(jsonx.Get(v, "id")); ok {
 							id = i
 						}
 					}
 					if modelStr == "" {
-						if m, ok := asStr(get(v, "model")); ok {
+						if m, ok := jsonx.AsStr(jsonx.Get(v, "model")); ok {
 							modelStr = m
 						}
 					}
-					if delta := pointer(v, "choices", "0", "delta"); delta != nil {
-						if c, ok := asStr(get(delta, "content")); ok {
+					if delta := jsonx.Pointer(v, "choices", "0", "delta"); delta != nil {
+						if c, ok := jsonx.AsStr(jsonx.Get(delta, "content")); ok {
 							content.WriteString(c)
 						}
-						if r, ok := asStr(get(delta, "reasoning_content")); ok {
+						if r, ok := jsonx.AsStr(jsonx.Get(delta, "reasoning_content")); ok {
 							reasoning.WriteString(r)
 						}
 					}
-					if fr := pointer(v, "choices", "0", "finish_reason"); fr != nil {
+					if fr := jsonx.Pointer(v, "choices", "0", "finish_reason"); fr != nil {
 						finishReason = fr
 					}
-					if u := get(v, "usage"); u != nil {
+					if u := jsonx.Get(v, "usage"); u != nil {
 						usage = u
 					}
 				}
@@ -95,11 +99,11 @@ outer:
 		"usage": usage,
 	}
 
-	return toJSON(respJSON)
+	return jsonx.Marshal(respJSON)
 }
 
-// sseHeaders sets the standard SSE streaming response headers.
-func sseHeaders(w http.ResponseWriter) {
+// SetHeaders sets the standard SSE streaming response headers.
+func SetHeaders(w http.ResponseWriter) {
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream; charset=utf-8")
 	h.Set("Cache-Control", "no-cache, no-store, must-revalidate")

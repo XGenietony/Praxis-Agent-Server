@@ -1,4 +1,6 @@
-package main
+// Package process spawns and supervises the backend (llama-server /
+// mlx_lm.server) and the frpc tunnel, killing them on shutdown.
+package process
 
 import (
 	"fmt"
@@ -9,18 +11,20 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"lmstudio-forward/internal/config"
 )
 
-// ProcessManager spawns and supervises the backend (llama-server / mlx_lm.server)
-// and the frpc tunnel, killing them on shutdown. Mirrors src/process.rs.
-type ProcessManager struct {
+// Manager spawns and supervises the backend and frpc child processes.
+// Mirrors src/process.rs.
+type Manager struct {
 	backendCmd *exec.Cmd
 	frpcCmd    *exec.Cmd
 }
 
-// newProcessManager creates an empty ProcessManager.
-func newProcessManager() *ProcessManager {
-	return &ProcessManager{}
+// NewManager creates an empty Manager.
+func NewManager() *Manager {
+	return &Manager{}
 }
 
 // killPort frees a TCP port by killing whatever process holds it
@@ -59,10 +63,10 @@ func waitForHealth(port int, path string, timeoutSecs int) bool {
 }
 
 // Start launches the configured backend then the frpc tunnel.
-func (pm *ProcessManager) Start(cfg *Config) error {
+func (pm *Manager) Start(cfg *config.Config) error {
 	if cfg.GgufModel != "" {
 		// ── llama-server backend ──
-		modelAbs := canonicalizePath(cfg.GgufModel)
+		modelAbs := config.CanonicalizePath(cfg.GgufModel)
 		log.Printf("INFO Starting llama-server with model: %s", modelAbs)
 
 		killPort(cfg.BackendPort)
@@ -92,7 +96,7 @@ func (pm *ProcessManager) Start(cfg *Config) error {
 
 	} else if cfg.MlxModel != "" {
 		// ── mlx_lm.server backend ──
-		modelAbs := canonicalizePath(cfg.MlxModel)
+		modelAbs := config.CanonicalizePath(cfg.MlxModel)
 		log.Printf("INFO Starting mlx_lm.server with model: %s", modelAbs)
 
 		killPort(cfg.BackendPort)
@@ -171,7 +175,7 @@ func (pm *ProcessManager) Start(cfg *Config) error {
 }
 
 // Stop kills the spawned child processes. Replaces Rust's Drop impl.
-func (pm *ProcessManager) Stop() {
+func (pm *Manager) Stop() {
 	if pm.backendCmd != nil && pm.backendCmd.Process != nil {
 		_ = pm.backendCmd.Process.Kill()
 	}
