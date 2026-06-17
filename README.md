@@ -1,6 +1,6 @@
 # lmstudio-forward
 
-A lightweight Rust proxy that exposes a local LLM (GGUF via llama-server, or MLX via mlx_lm.server) as a unified API endpoint, with optional public tunnel via frpc.
+A lightweight Go proxy that exposes a local LLM (GGUF via llama-server, or MLX via mlx_lm.server) as a unified API endpoint, with optional public tunnel via frpc.
 
 ## What it does
 
@@ -11,7 +11,7 @@ A lightweight Rust proxy that exposes a local LLM (GGUF via llama-server, or MLX
 
 ## Requirements
 
-- Rust (for building)
+- Go 1.23+ (for building; no third-party dependencies — stdlib only)
 - One of:
   - **GGUF**: [llama-server](https://github.com/ggerganov/llama.cpp) (`brew install llama.cpp`)
   - **MLX**: Python venv with `mlx-lm` installed
@@ -20,10 +20,37 @@ A lightweight Rust proxy that exposes a local LLM (GGUF via llama-server, or MLX
 ## Build
 
 ```bash
-cargo build --release
+go build -o lmstudio-forward ./cmd/lmstudio-forward
 ```
 
-The binary is output to `./target/release/lmstudio-forward`.
+The binary is output to `./lmstudio-forward`.
+
+Run the tests with:
+
+```bash
+go test ./...
+```
+
+## Project layout
+
+Standard Go layout — `cmd/` holds the entrypoint (bootstrap + dependency
+injection only); all behavior lives in `internal/`:
+
+```
+cmd/lmstudio-forward/   application entrypoint (wiring only)
+internal/
+  config/      configuration: flags, env, defaults
+  jsonx/       dynamic-JSON helper layer (serde_json::Value equivalent)
+  language/    token estimation, context truncation, complexity scoring
+  tools/       tool-call adaptation + <tool_call> parsing (batch & streaming)
+  rag/         Agentic RAG: Qdrant client, chunking, retrieve tool
+  stream/      SSE collection + response headers
+  proxy/       shared app state, client-IP + API-key helpers
+  openai/      OpenAI-compatible forwarding handler
+  anthropic/   Anthropic Messages handler + protocol conversion
+  process/     backend (llama-server/mlx) + frpc process supervision
+  server/      route wiring, health + RAG-ingest handlers
+```
 
 ## Quick start
 
