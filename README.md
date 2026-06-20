@@ -1,5 +1,7 @@
 # lmstudio-forward
 
+语言版本：中文 | [English](README.en.md)
+
 `lmstudio-forward` 是一个轻量级 Go 代理服务，用来把本地大模型后端统一包装成 OpenAI-compatible 和 Anthropic-compatible API。它可以自动拉起 `llama-server` 或 `mlx_lm.server`，也可以转发到已经运行的外部 OpenAI-compatible 后端；可选开启 frpc 公网隧道和基于 Qdrant 的 Agentic RAG 检索。
 
 ## 功能概览
