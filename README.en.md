@@ -13,6 +13,7 @@ Language: [中文](README.md) | English
 - Supports SSE response forwarding and Anthropic event stream conversion.
 - Injects default sampling parameters, truncates context, and applies lightweight thinking control.
 - Optionally enables Agentic RAG: the model can call the built-in `retrieve` tool, the server searches Qdrant, and retrieved context is fed back into the conversation.
+- Documents the integration boundary for ReAct and CodeAct agent methods.
 - Optionally starts frpc to expose the local service through a public tunnel.
 
 ## Requirements
@@ -119,6 +120,37 @@ If `--api-key` / `API_KEY` is set, requests must include either of these authent
 Authorization: Bearer <API_KEY>
 x-api-key: <API_KEY>
 ```
+
+## Agent Methods
+
+This project is closer to an Agent Runtime Gateway / LLM protocol gateway: it handles protocol conversion, streaming semantics reconstruction, tool-call adaptation, RAG context injection, and backend governance. ReAct and CodeAct can both be used as upper-layer agent methods, but their boundaries inside this repository are different.
+
+### ReAct
+
+ReAct means a Reason + Act loop: the model reasons about the task, decides whether to call a tool, receives an observation, then continues reasoning and produces the final answer. In this project, ReAct is mainly represented through the tool-call protocol:
+
+```text
+User question -> model reasoning -> emits <tool_call> -> proxy parses tool call
+              -> execute retrieve / external tool -> feed back observation
+              -> model continues reasoning -> final answer
+```
+
+The built-in Agentic RAG path is a ReAct-style special case: Anthropic Messages requests receive a `retrieve` tool, the model emits a retrieval action when it needs knowledge-base context, and the proxy internally searches Qdrant before appending the results back into the conversation.
+
+### CodeAct
+
+CodeAct means the model expresses an action as code or a structured command, an external runner executes it, and the execution result is returned to the model. It is useful for file processing, data analysis, automation scripts, repository search, and batch operations.
+
+This repository does not currently include an arbitrary code execution sandbox, and it should not directly execute model-generated code. The recommended boundary is:
+
+```text
+Upper-layer agent generates code/command -> external safe runner executes it
+                                      -> stdout/stderr/result becomes tool result
+                                      -> this proxy handles protocol conversion,
+                                         streaming, and context transport
+```
+
+To integrate CodeAct, put code execution, permission control, timeouts, filesystem isolation, and audit logging in a separate tool service, then expose that service to the model through a standard tool schema. This proxy should focus on reliably passing tool calls and tool results between OpenAI and Anthropic protocols.
 
 ## Agentic RAG
 
