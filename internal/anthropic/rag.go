@@ -2,6 +2,7 @@ package anthropic
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -12,11 +13,16 @@ import (
 	"lmstudio-forward/internal/tools"
 )
 
+type toolCall struct {
+	Name string
+	Args string
+}
+
 // extractToolCalls extracts (name, arguments_json_string) pairs from a
 // transformed OpenAI response (choices[0].message.tool_calls).
-func extractToolCalls(resp any) [][2]string {
+func extractToolCalls(resp any) []toolCall {
 	calls := jsonx.AsArr(jsonx.Pointer(resp, "choices", "0", "message", "tool_calls"))
-	var out [][2]string
+	var out []toolCall
 	for _, tc := range calls {
 		f := jsonx.Get(tc, "function")
 		if f == nil {
@@ -30,9 +36,91 @@ func extractToolCalls(resp any) [][2]string {
 		if v, ok := jsonx.AsStr(jsonx.Get(f, "arguments")); ok {
 			args = v
 		}
-		out = append(out, [2]string{name, args})
+		out = append(out, toolCall{Name: name, Args: args})
 	}
 	return out
+}
+
+func splitRetrieveToolCalls(calls []toolCall) (retrieve []toolCall, external []toolCall) {
+	for _, c := range calls {
+		if c.Name == rag.RetrieveToolName {
+			retrieve = append(retrieve, c)
+		} else {
+			external = append(external, c)
+		}
+	}
+	return retrieve, external
+}
+
+func appendRetrieveObservations(body map[string]any, ragClient *rag.Client, calls []toolCall, round int) {
+	for _, c := range calls {
+		query := ""
+		if v, err := jsonx.Parse([]byte(c.Args)); err == nil {
+			query = jsonx.Str(jsonx.Get(v, "query"))
+		}
+		if query == "" {
+			continue
+		}
+		chunks, err := ragClient.Search(query)
+		if err != nil {
+			log.Printf("ERROR RAG search failed for query '%s': %v", query, err)
+			chunks = nil
+		}
+		log.Printf("INFO RAG round %d: query='%s' hits=%d", round+1, query, len(chunks))
+		result := rag.FormatChunks(chunks)
+		if messages := jsonx.AsArr(body["messages"]); messages != nil {
+			messages = append(messages, map[string]any{
+				"role":    "assistant",
+				"content": rag.RetrieveCallText(query),
+			})
+			messages = append(messages, map[string]any{
+				"role":    "user",
+				"content": "[retrieve result]\n" + result,
+			})
+			body["messages"] = messages
+		}
+	}
+}
+
+func stripRetrieveToolCalls(resp any) ([]byte, error) {
+	choices := jsonx.AsArr(jsonx.Get(resp, "choices"))
+	for _, ch := range choices {
+		choice := jsonx.AsObj(ch)
+		if choice == nil {
+			continue
+		}
+		msg := jsonx.AsObj(choice["message"])
+		if msg == nil {
+			continue
+		}
+		calls := jsonx.AsArr(msg["tool_calls"])
+		if len(calls) == 0 {
+			continue
+		}
+
+		filtered := make([]any, 0, len(calls))
+		for _, tc := range calls {
+			name := jsonx.GetStr(jsonx.Get(tc, "function"), "name")
+			if name != rag.RetrieveToolName {
+				filtered = append(filtered, tc)
+			}
+		}
+		if len(filtered) == 0 {
+			delete(msg, "tool_calls")
+			if msg["content"] == nil {
+				msg["content"] = ""
+			}
+			choice["finish_reason"] = "stop"
+			continue
+		}
+		msg["tool_calls"] = filtered
+		choice["finish_reason"] = "tool_calls"
+	}
+	out := jsonx.Marshal(resp)
+	if out == nil {
+		return nil, errors.New("failed to marshal response after filtering internal tools")
+	}
+	return out, nil
 }
 
 // backendOnce sends body to the backend once (non-streaming) and returns the
@@ -81,46 +169,16 @@ func (h *Handler) resolveRagRounds(url string, ragClient *rag.Client, body map[s
 		}
 		calls := extractToolCalls(resp)
 
-		onlyRetrieve := len(calls) > 0
-		for _, c := range calls {
-			if c[0] != rag.RetrieveToolName {
-				onlyRetrieve = false
-			}
-		}
-		if !onlyRetrieve {
+		retrieveCalls, _ := splitRetrieveToolCalls(calls)
+		if len(retrieveCalls) == 0 {
 			// Final answer (text or a client-handled tool call).
 			return body, respBytes, nil
 		}
 
-		// Consume each retrieve call: search and append context to the conversation.
-		for _, c := range calls {
-			args := c[1]
-			query := ""
-			if v, err := jsonx.Parse([]byte(args)); err == nil {
-				query = jsonx.Str(jsonx.Get(v, "query"))
-			}
-			if query == "" {
-				continue
-			}
-			chunks, err := ragClient.Search(query)
-			if err != nil {
-				log.Printf("ERROR RAG search failed for query '%s': %v", query, err)
-				chunks = nil
-			}
-			log.Printf("INFO RAG round %d: query='%s' hits=%d", round+1, query, len(chunks))
-			result := rag.FormatChunks(chunks)
-			if messages := jsonx.AsArr(body["messages"]); messages != nil {
-				messages = append(messages, map[string]any{
-					"role":    "assistant",
-					"content": rag.RetrieveCallText(query),
-				})
-				messages = append(messages, map[string]any{
-					"role":    "user",
-					"content": "[retrieve result]\n" + result,
-				})
-				body["messages"] = messages
-			}
-		}
+		// Consume internal retrieve calls even when the model also emitted
+		// client tools. The next round lets the model choose external tools again
+		// after seeing the retrieved observation.
+		appendRetrieveObservations(body, ragClient, retrieveCalls, round)
 	}
 
 	// Max rounds hit: force a direct answer.
@@ -134,6 +192,22 @@ func (h *Handler) resolveRagRounds(url string, ragClient *rag.Client, body map[s
 	finalBytes, err := h.backendOnce(url, body)
 	if err != nil {
 		return nil, nil, err
+	}
+	resp, err := jsonx.Parse(finalBytes)
+	if err != nil {
+		return nil, nil, err
+	}
+	calls := extractToolCalls(resp)
+	retrieveCalls, externalCalls := splitRetrieveToolCalls(calls)
+	if len(retrieveCalls) > 0 && len(externalCalls) == 0 {
+		return nil, nil, fmt.Errorf("RAG loop exhausted after %d rounds with only internal retrieve calls", rounds)
+	}
+	if len(retrieveCalls) > 0 {
+		filtered, err := stripRetrieveToolCalls(resp)
+		if err != nil {
+			return nil, nil, err
+		}
+		return body, filtered, nil
 	}
 	return body, finalBytes, nil
 }
