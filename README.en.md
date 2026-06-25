@@ -156,6 +156,8 @@ To integrate CodeAct, put code execution, permission control, timeouts, filesyst
 
 When RAG is enabled, Anthropic Messages requests automatically receive the built-in `retrieve` tool. If the model decides it needs knowledge-base context, it emits a `retrieve` tool call; the proxy internally calls the embeddings service and Qdrant, appends the matched passages back into the conversation, and lets the model continue answering. This retrieval loop is invisible to the client.
 
+`retrieve` is an internal tool and is never forwarded as a client-visible `tool_use`. If the model emits both `retrieve` and external tools in one turn, the proxy consumes retrieval first and asks the model to decide again with the new context. Streaming RAG requests reuse the final answer already produced by the internal loop and convert it to Anthropic SSE, so the backend is not asked to generate the answer a second time.
+
 RAG currently runs only on Anthropic Messages routes: `/v1/messages`, `/v1/message`, `/anthropic`, and `/anthropic/v1/messages`. The OpenAI `/v1/chat/completions` route is currently transparent forwarding and does not execute the internal retrieve loop.
 
 ### Enable RAG
@@ -229,6 +231,7 @@ All options can be set through CLI flags or environment variables. CLI flags tak
 | `--embed-dim` | `EMBED_DIM` | `1024` | Embedding vector dimension |
 | `--rag-top-k` | `RAG_TOP_K` | `5` | Number of chunks returned per retrieval |
 | `--rag-max-rounds` | `RAG_MAX_ROUNDS` | `3` | Maximum internal retrieval rounds per request |
+| `--rag-step-timeout-seconds` | `RAG_STEP_TIMEOUT_SECONDS` | `120` | Timeout in seconds for each internal RAG backend, embedding, or Qdrant retrieval step |
 | `--rag-chunk-size` | `RAG_CHUNK_SIZE` | `800` | Chunk size in characters when ingesting documents |
 | `--rag-chunk-overlap` | `RAG_CHUNK_OVERLAP` | `100` | Chunk overlap in characters |
 
@@ -251,6 +254,7 @@ All options can be set through CLI flags or environment variables. CLI flags tak
 ```text
 cmd/lmstudio-forward/   Application entrypoint: config parsing, dependency wiring, server startup
 internal/
+  agentloop/   Internal Agent loop: retrieve action detection, observation feedback, stop policy
   config/      Config parsing: flags, environment variables, defaults
   jsonx/       Dynamic JSON helpers
   language/    Token estimation, context truncation, complexity detection

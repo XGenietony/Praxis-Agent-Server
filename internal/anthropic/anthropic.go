@@ -6,7 +6,7 @@
 //
 //	anthropic.go  Handler type, error helper, shared stream state
 //	handler.go    the Messages HTTP handler (request orchestration)
-//	rag.go        the internal retrieve-loop (resolveRagRounds, backendOnce)
+//	rag.go        the Agentic RAG adapter (resolveRagRounds, backendOnce)
 //	convert.go    OpenAI<->Anthropic protocol conversion (batch + chunk)
 //	stream.go     the SSE streaming pump
 package anthropic

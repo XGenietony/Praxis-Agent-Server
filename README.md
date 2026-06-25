@@ -155,6 +155,8 @@ CodeAct 指模型把“行动”表达为代码或结构化命令，由外部运
 
 开启 RAG 后，Anthropic Messages 请求会自动注入内置 `retrieve` 工具。模型如果判断需要查知识库，会发出 `retrieve` tool call；代理服务会在内部调用 embedding 服务和 Qdrant，把命中的文本片段作为检索结果追加回上下文，再让模型继续回答。这个检索过程对客户端是透明的。
 
+`retrieve` 属于内部工具，不会作为客户端可见的 `tool_use` 透传。即使模型同一轮同时输出 `retrieve` 和外部工具调用，代理也会先消费检索结果并进入下一轮，让模型基于新上下文重新决定动作。流式 RAG 请求会复用内部 loop 已经得到的最终回答转换为 Anthropic SSE，不会为了流式输出再次请求后端生成。
+
 当前 RAG 只接在 Anthropic Messages 路径上，也就是 `/v1/messages`、`/v1/message`、`/anthropic`、`/anthropic/v1/messages`。OpenAI `/v1/chat/completions` 路径目前是透明转发，不会执行内部 retrieve loop。
 
 ### 启用 RAG
@@ -228,6 +230,7 @@ curl http://127.0.0.1:8000/rag/ingest \
 | `--embed-dim` | `EMBED_DIM` | `1024` | embedding 向量维度 |
 | `--rag-top-k` | `RAG_TOP_K` | `5` | 每次检索返回的 chunk 数 |
 | `--rag-max-rounds` | `RAG_MAX_ROUNDS` | `3` | 单次请求最多内部检索轮数 |
+| `--rag-step-timeout-seconds` | `RAG_STEP_TIMEOUT_SECONDS` | `120` | 内部 RAG 后端调用、embedding 和 Qdrant 检索的单阶段超时秒数 |
 | `--rag-chunk-size` | `RAG_CHUNK_SIZE` | `800` | 文档写入时的 chunk 字符数 |
 | `--rag-chunk-overlap` | `RAG_CHUNK_OVERLAP` | `100` | chunk 重叠字符数 |
 
@@ -250,6 +253,7 @@ curl http://127.0.0.1:8000/rag/ingest \
 ```text
 cmd/lmstudio-forward/   应用入口，只负责配置解析、依赖装配和服务启动
 internal/
+  agentloop/   内部 Agent loop：retrieve 动作识别、observation 回填和停止策略
   config/      配置解析：flag、环境变量、默认值
   jsonx/       动态 JSON 辅助函数
   language/    token 估算、上下文截断、复杂度判断
