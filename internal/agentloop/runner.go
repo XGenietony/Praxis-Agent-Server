@@ -4,9 +4,11 @@
 package agentloop
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
+	"time"
 
 	"lmstudio-forward/internal/jsonx"
 	"lmstudio-forward/internal/rag"
@@ -14,12 +16,12 @@ import (
 
 // Backend completes one model turn for the current request body.
 type Backend interface {
-	Complete(body map[string]any) ([]byte, error)
+	Complete(ctx context.Context, body map[string]any) ([]byte, error)
 }
 
 // Retriever is the internal retrieve tool implementation.
 type Retriever interface {
-	Search(query string) ([]rag.RetrievedChunk, error)
+	Search(ctx context.Context, query string) ([]rag.RetrievedChunk, error)
 }
 
 // Runner consumes internal retrieve tool calls until the model produces a
@@ -28,6 +30,9 @@ type Runner struct {
 	Backend   Backend
 	Retriever Retriever
 	MaxRounds int
+	// StepTimeout bounds one hidden backend/retrieval step. A zero or negative
+	// value means the caller's context is used without adding a timeout.
+	StepTimeout time.Duration
 }
 
 type toolCall struct {
@@ -36,14 +41,16 @@ type toolCall struct {
 }
 
 // Run returns the augmented request body and the final backend response bytes.
-func (r Runner) Run(body map[string]any) (map[string]any, []byte, error) {
+func (r Runner) Run(ctx context.Context, body map[string]any) (map[string]any, []byte, error) {
 	rounds := r.MaxRounds
 	if rounds < 1 {
 		rounds = 1
 	}
 
 	for round := 0; round < rounds; round++ {
-		respBytes, err := r.Backend.Complete(body)
+		stepCtx, cancel := r.stepContext(ctx)
+		respBytes, err := r.Backend.Complete(stepCtx, body)
+		cancel()
 		if err != nil {
 			return nil, nil, err
 		}
@@ -61,7 +68,9 @@ func (r Runner) Run(body map[string]any) (map[string]any, []byte, error) {
 		// Consume internal retrieve calls even when the model also emitted
 		// client tools. The next round lets the model choose external tools again
 		// after seeing the retrieved observation.
-		r.appendRetrieveObservations(body, retrieveCalls, round)
+		if err := r.appendRetrieveObservations(ctx, body, retrieveCalls, round); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	if messages := jsonx.AsArr(body["messages"]); messages != nil {
@@ -71,7 +80,9 @@ func (r Runner) Run(body map[string]any) (map[string]any, []byte, error) {
 		})
 		body["messages"] = messages
 	}
-	finalBytes, err := r.Backend.Complete(body)
+	stepCtx, cancel := r.stepContext(ctx)
+	finalBytes, err := r.Backend.Complete(stepCtx, body)
+	cancel()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -92,6 +103,13 @@ func (r Runner) Run(body map[string]any) (map[string]any, []byte, error) {
 		return body, filtered, nil
 	}
 	return body, finalBytes, nil
+}
+
+func (r Runner) stepContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if r.StepTimeout <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, r.StepTimeout)
 }
 
 func extractToolCalls(resp any) []toolCall {
@@ -126,7 +144,7 @@ func splitRetrieveToolCalls(calls []toolCall) (retrieve []toolCall, external []t
 	return retrieve, external
 }
 
-func (r Runner) appendRetrieveObservations(body map[string]any, calls []toolCall, round int) {
+func (r Runner) appendRetrieveObservations(ctx context.Context, body map[string]any, calls []toolCall, round int) error {
 	for _, c := range calls {
 		query := ""
 		if v, err := jsonx.Parse([]byte(c.Args)); err == nil {
@@ -135,7 +153,12 @@ func (r Runner) appendRetrieveObservations(body map[string]any, calls []toolCall
 		if query == "" {
 			continue
 		}
-		chunks, err := r.Retriever.Search(query)
+		stepCtx, cancel := r.stepContext(ctx)
+		chunks, err := r.Retriever.Search(stepCtx, query)
+		cancel()
+		if err != nil && ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if err != nil {
 			log.Printf("ERROR RAG search failed for query '%s': %v", query, err)
 			chunks = nil
@@ -154,6 +177,7 @@ func (r Runner) appendRetrieveObservations(body map[string]any, calls []toolCall
 			body["messages"] = messages
 		}
 	}
+	return nil
 }
 
 func stripRetrieveToolCalls(resp any) ([]byte, error) {

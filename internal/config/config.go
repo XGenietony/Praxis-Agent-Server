@@ -47,6 +47,7 @@ type Config struct {
 	EmbedDim              int
 	RagTopK               int
 	RagMaxRounds          int
+	RagStepTimeoutSeconds int
 	RagChunkSize          int
 	RagChunkOverlap       int
 }
@@ -126,6 +127,7 @@ func Parse() Config {
 	flag.IntVar(&c.EmbedDim, "embed-dim", envInt("EMBED_DIM", 1024), "Embedding vector dimension (must match the embedding model's output)")
 	flag.IntVar(&c.RagTopK, "rag-top-k", envInt("RAG_TOP_K", 5), "Number of chunks returned per retrieval")
 	flag.IntVar(&c.RagMaxRounds, "rag-max-rounds", envInt("RAG_MAX_ROUNDS", 3), "Max internal retrieval rounds per request (loop guard)")
+	flag.IntVar(&c.RagStepTimeoutSeconds, "rag-step-timeout-seconds", envInt("RAG_STEP_TIMEOUT_SECONDS", 120), "Timeout in seconds for each internal RAG backend/retrieval step")
 	flag.IntVar(&c.RagChunkSize, "rag-chunk-size", envInt("RAG_CHUNK_SIZE", 800), "Chunk size in characters when ingesting documents")
 	flag.IntVar(&c.RagChunkOverlap, "rag-chunk-overlap", envInt("RAG_CHUNK_OVERLAP", 100), "Chunk overlap in characters when ingesting documents")
 

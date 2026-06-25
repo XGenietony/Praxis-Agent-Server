@@ -92,7 +92,7 @@ func (h *Handler) Messages(w http.ResponseWriter, r *http.Request) {
 
 	// Agentic RAG: consume internal `retrieve` rounds before responding to the client.
 	if s.Rag != nil {
-		augmentedBody, finalBytes, err := h.resolveRagRounds(url, s.Rag, openaiBody, s.Config.RagMaxRounds)
+		augmentedBody, finalBytes, err := h.resolveRagRounds(r.Context(), url, s.Rag, openaiBody, s.Config.RagMaxRounds)
 		if err != nil {
 			log.Printf("ERROR RAG loop failed: %v", err)
 			anthropicError(w, http.StatusBadGateway, "api_error", "RAG loop failed: "+err.Error())
@@ -101,7 +101,7 @@ func (h *Handler) Messages(w http.ResponseWriter, r *http.Request) {
 		openaiBody = augmentedBody
 		// Reuse the already-collected final answer; no extra generation.
 		if isStream {
-			if err := h.streamCollectedAnthropic(w, finalBytes, model, clientIP, start); err != nil {
+			if err := h.streamCollectedAnthropic(r.Context(), w, finalBytes, model, clientIP, start); err != nil {
 				log.Printf("ERROR Invalid RAG stream response: %v", err)
 				anthropicError(w, http.StatusInternalServerError, "api_error", err.Error())
 			}
@@ -123,7 +123,7 @@ func (h *Handler) Messages(w http.ResponseWriter, r *http.Request) {
 	if isStream {
 		openaiBody["stream"] = true
 		openaiBody["stream_options"] = map[string]any{"include_usage": true}
-		h.streamAnthropic(w, url, jsonx.Marshal(openaiBody), model, clientIP, start)
+		h.streamAnthropic(r.Context(), w, url, jsonx.Marshal(openaiBody), model, clientIP, start)
 		return
 	}
 
@@ -131,7 +131,7 @@ func (h *Handler) Messages(w http.ResponseWriter, r *http.Request) {
 	openaiBody["stream"] = true
 	openaiBody["stream_options"] = map[string]any{"include_usage": true}
 
-	req, err := http.NewRequest("POST", url, bytes.NewReader(jsonx.Marshal(openaiBody)))
+	req, err := http.NewRequestWithContext(r.Context(), "POST", url, bytes.NewReader(jsonx.Marshal(openaiBody)))
 	if err != nil {
 		log.Printf("ERROR Cannot connect to LM Studio: %v", err)
 		anthropicError(w, http.StatusBadGateway, "api_error", "Cannot connect to backend: "+err.Error())

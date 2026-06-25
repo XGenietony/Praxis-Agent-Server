@@ -3,6 +3,7 @@ package anthropic
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -17,7 +18,7 @@ import (
 
 // streamAnthropic connects to the backend and pumps converted Anthropic SSE
 // events to the client, emitting ping keepalives during connect and streaming.
-func (h *Handler) streamAnthropic(w http.ResponseWriter, url string, openaiBytes []byte, model, clientIP string, start time.Time) {
+func (h *Handler) streamAnthropic(ctx context.Context, w http.ResponseWriter, url string, openaiBytes []byte, model, clientIP string, start time.Time) {
 	s := h.State
 	stream.SetHeaders(w)
 	flusher, _ := w.(http.Flusher)
@@ -45,7 +46,7 @@ func (h *Handler) streamAnthropic(w http.ResponseWriter, url string, openaiBytes
 	}
 	respCh := make(chan respResult, 1)
 	go func() {
-		req, err := http.NewRequest("POST", url, bytes.NewReader(openaiBytes))
+		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(openaiBytes))
 		if err != nil {
 			respCh <- respResult{nil, err}
 			return
@@ -70,6 +71,9 @@ connectLoop:
 			}
 			resp = rr.resp
 			break connectLoop
+		case <-ctx.Done():
+			log.Printf("INFO %s Anthropic stream canceled before backend connect: %v", clientIP, ctx.Err())
+			return
 		case <-ticker.C:
 			w.Write(ping)
 			flush()
@@ -85,7 +89,12 @@ connectLoop:
 		for {
 			line, err := reader.ReadString('\n')
 			if line != "" {
-				lineCh <- line
+				select {
+				case lineCh <- line:
+				case <-ctx.Done():
+					close(lineCh)
+					return
+				}
 			}
 			if err != nil {
 				if err != io.EOF {
@@ -120,6 +129,9 @@ streamLoop:
 				w.Write([]byte(fmt.Sprintf("event: %s\ndata: %s\n\n", jsonx.Str(jsonx.Get(event, "type")), jsonx.MarshalString(event))))
 				flush()
 			}
+		case <-ctx.Done():
+			log.Printf("INFO %s Anthropic stream canceled: %v", clientIP, ctx.Err())
+			return
 		case <-ticker.C:
 			w.Write(ping)
 			flush()
@@ -150,7 +162,7 @@ streamLoop:
 // Anthropic SSE events. RAG uses this to avoid generating a second answer for
 // streaming clients after internal retrieve rounds have already produced the
 // final response.
-func (h *Handler) streamCollectedAnthropic(w http.ResponseWriter, openaiBytes []byte, model, clientIP string, start time.Time) error {
+func (h *Handler) streamCollectedAnthropic(ctx context.Context, w http.ResponseWriter, openaiBytes []byte, model, clientIP string, start time.Time) error {
 	respBody, err := jsonx.Parse(openaiBytes)
 	if err != nil {
 		return err
@@ -165,6 +177,9 @@ func (h *Handler) streamCollectedAnthropic(w http.ResponseWriter, openaiBytes []
 		}
 	}
 	writeEvent := func(event any) {
+		if ctx.Err() != nil {
+			return
+		}
 		w.Write([]byte(fmt.Sprintf("event: %s\ndata: %s\n\n", jsonx.GetStr(event, "type"), jsonx.MarshalString(event))))
 		flush()
 	}
