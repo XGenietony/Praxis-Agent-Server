@@ -13,6 +13,7 @@
 - 支持 SSE 流式响应转发与 Anthropic 事件流转换。
 - 自动注入默认采样参数、上下文截断和简单的 thinking 控制。
 - 可选启用 Agentic RAG：模型主动调用内置 `retrieve` 工具，服务端检索 Qdrant 后把结果回填上下文。
+- 文档化 ReAct / CodeAct 两类 Agent 方法在本代理中的接入边界。
 - 可选启动 frpc，将本地服务暴露为公网访问入口。
 
 ## 环境要求
@@ -120,9 +121,41 @@ Authorization: Bearer <API_KEY>
 x-api-key: <API_KEY>
 ```
 
+## Agent 方法
+
+本项目更像 Agent Runtime Gateway / LLM 协议网关：负责协议转换、流式语义重建、工具调用适配、RAG 上下文回填和后端治理。ReAct 与 CodeAct 可以作为上层 Agent 的两种调用范式接入，但它们在本仓库里的职责边界不同。
+
+### ReAct
+
+ReAct 指 Reason + Act 的循环：模型先分析任务，再选择是否调用工具，拿到 observation 后继续推理并给出答案。在本项目中，ReAct 主要通过工具调用协议实现：
+
+```text
+用户问题 -> 模型推理 -> 输出 <tool_call> -> 代理解析工具调用
+        -> 执行 retrieve / 外部工具 -> 回填 observation
+        -> 模型继续推理 -> 最终回答
+```
+
+当前内置的 Agentic RAG 就是一个 ReAct 风格的特例：Anthropic Messages 请求会注入 `retrieve` 工具，模型决定需要知识库信息时发出检索动作，代理内部执行 Qdrant 检索并把结果追加回上下文。
+
+### CodeAct
+
+CodeAct 指模型把“行动”表达为代码或结构化命令，由外部运行器执行，再把执行结果返回给模型。它适合文件处理、数据分析、自动化脚本、仓库检索和批量操作等场景。
+
+本仓库当前不内置任意代码执行沙箱，也不直接执行模型生成的代码。推荐边界是：
+
+```text
+上层 Agent 生成代码/命令 -> 外部安全执行器运行
+                  -> 将 stdout/stderr/结果作为 tool result
+                  -> 本代理负责协议转换、流式返回和上下文传递
+```
+
+如果要接 CodeAct，建议把代码执行、权限控制、超时、文件系统隔离和审计日志放在独立工具服务中，再通过标准 tool schema 暴露给模型。本代理只负责把工具调用和结果在 OpenAI / Anthropic 协议之间稳定传递。
+
 ## Agentic RAG
 
 开启 RAG 后，Anthropic Messages 请求会自动注入内置 `retrieve` 工具。模型如果判断需要查知识库，会发出 `retrieve` tool call；代理服务会在内部调用 embedding 服务和 Qdrant，把命中的文本片段作为检索结果追加回上下文，再让模型继续回答。这个检索过程对客户端是透明的。
+
+`retrieve` 属于内部工具，不会作为客户端可见的 `tool_use` 透传。即使模型同一轮同时输出 `retrieve` 和外部工具调用，代理也会先消费检索结果并进入下一轮，让模型基于新上下文重新决定动作。流式 RAG 请求会复用内部 loop 已经得到的最终回答转换为 Anthropic SSE，不会为了流式输出再次请求后端生成。
 
 当前 RAG 只接在 Anthropic Messages 路径上，也就是 `/v1/messages`、`/v1/message`、`/anthropic`、`/anthropic/v1/messages`。OpenAI `/v1/chat/completions` 路径目前是透明转发，不会执行内部 retrieve loop。
 
@@ -197,6 +230,7 @@ curl http://127.0.0.1:8000/rag/ingest \
 | `--embed-dim` | `EMBED_DIM` | `1024` | embedding 向量维度 |
 | `--rag-top-k` | `RAG_TOP_K` | `5` | 每次检索返回的 chunk 数 |
 | `--rag-max-rounds` | `RAG_MAX_ROUNDS` | `3` | 单次请求最多内部检索轮数 |
+| `--rag-step-timeout-seconds` | `RAG_STEP_TIMEOUT_SECONDS` | `120` | 内部 RAG 后端调用、embedding 和 Qdrant 检索的单阶段超时秒数 |
 | `--rag-chunk-size` | `RAG_CHUNK_SIZE` | `800` | 文档写入时的 chunk 字符数 |
 | `--rag-chunk-overlap` | `RAG_CHUNK_OVERLAP` | `100` | chunk 重叠字符数 |
 
@@ -219,6 +253,7 @@ curl http://127.0.0.1:8000/rag/ingest \
 ```text
 cmd/lmstudio-forward/   应用入口，只负责配置解析、依赖装配和服务启动
 internal/
+  agentloop/   内部 Agent loop：retrieve 动作识别、observation 回填和停止策略
   config/      配置解析：flag、环境变量、默认值
   jsonx/       动态 JSON 辅助函数
   language/    token 估算、上下文截断、复杂度判断

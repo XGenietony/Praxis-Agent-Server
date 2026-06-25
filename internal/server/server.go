@@ -103,7 +103,7 @@ func (s *Server) handleRagIngest(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	n, err := s.state.Rag.Ingest(docs)
+	n, err := s.state.Rag.Ingest(r.Context(), docs)
 	if err != nil {
 		log.Printf("ERROR RAG ingest failed: %v", err)
 		http.Error(w, fmt.Sprintf("ingest failed: %v", err), http.StatusInternalServerError)

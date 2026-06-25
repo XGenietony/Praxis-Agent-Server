@@ -2,6 +2,7 @@ package rag
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"fmt"
 	"io"
@@ -45,8 +46,8 @@ func NewClient(httpClient *http.Client, cfg *config.Config) *Client {
 
 // sendJSON issues an HTTP request with a JSON body and the appropriate
 // Content-Type header.
-func (c *Client) sendJSON(method, url string, body any) (*http.Response, error) {
-	req, err := http.NewRequest(method, url, bytes.NewReader(jsonx.Marshal(body)))
+func (c *Client) sendJSON(ctx context.Context, method, url string, body any) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(jsonx.Marshal(body)))
 	if err != nil {
 		return nil, err
 	}
@@ -69,9 +70,13 @@ func bodyString(resp *http.Response) string {
 }
 
 // EnsureCollection idempotently creates the Qdrant collection (Cosine distance).
-func (c *Client) EnsureCollection() error {
+func (c *Client) EnsureCollection(ctx context.Context) error {
 	url := fmt.Sprintf("%s/collections/%s", c.qdrantURL, c.collection)
-	if resp, err := c.http.Get(url); err == nil {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	if resp, err := c.http.Do(req); err == nil {
 		ok := isSuccess(resp)
 		resp.Body.Close()
 		if ok {
@@ -83,7 +88,7 @@ func (c *Client) EnsureCollection() error {
 	body := map[string]any{
 		"vectors": map[string]any{"size": c.embedDim, "distance": "Cosine"},
 	}
-	resp, err := c.sendJSON(http.MethodPut, url, body)
+	resp, err := c.sendJSON(ctx, http.MethodPut, url, body)
 	if err != nil {
 		return fmt.Errorf("qdrant create collection request failed: %w", err)
 	}
@@ -97,13 +102,13 @@ func (c *Client) EnsureCollection() error {
 
 // Embed embeds a batch of texts via the OpenAI-compatible `/v1/embeddings`
 // endpoint.
-func (c *Client) Embed(texts []string) ([][]float32, error) {
+func (c *Client) Embed(ctx context.Context, texts []string) ([][]float32, error) {
 	if len(texts) == 0 {
 		return [][]float32{}, nil
 	}
 	url := fmt.Sprintf("%s/v1/embeddings", c.embedURL)
 	body := map[string]any{"model": c.embedModel, "input": texts}
-	resp, err := c.sendJSON(http.MethodPost, url, body)
+	resp, err := c.sendJSON(ctx, http.MethodPost, url, body)
 	if err != nil {
 		return nil, fmt.Errorf("embedding request failed: %w", err)
 	}
@@ -140,8 +145,8 @@ func (c *Client) Embed(texts []string) ([][]float32, error) {
 }
 
 // Search embeds the query and returns the top-k matching chunks from Qdrant.
-func (c *Client) Search(query string) ([]RetrievedChunk, error) {
-	vectors, err := c.Embed([]string{query})
+func (c *Client) Search(ctx context.Context, query string) ([]RetrievedChunk, error) {
+	vectors, err := c.Embed(ctx, []string{query})
 	if err != nil {
 		return nil, err
 	}
@@ -156,7 +161,7 @@ func (c *Client) Search(query string) ([]RetrievedChunk, error) {
 		"limit":        c.topK,
 		"with_payload": true,
 	}
-	resp, err := c.sendJSON(http.MethodPost, url, body)
+	resp, err := c.sendJSON(ctx, http.MethodPost, url, body)
 	if err != nil {
 		return nil, fmt.Errorf("qdrant search request failed: %w", err)
 	}
@@ -195,7 +200,7 @@ func (c *Client) Search(query string) ([]RetrievedChunk, error) {
 
 // Ingest chunks, embeds, and upserts documents into Qdrant. It returns the
 // number of chunks stored.
-func (c *Client) Ingest(docs []IngestDoc) (int, error) {
+func (c *Client) Ingest(ctx context.Context, docs []IngestDoc) (int, error) {
 	var texts []string
 	var sources []string
 	for i := range docs {
@@ -212,7 +217,7 @@ func (c *Client) Ingest(docs []IngestDoc) (int, error) {
 		return 0, nil
 	}
 
-	vectors, err := c.Embed(texts)
+	vectors, err := c.Embed(ctx, texts)
 	if err != nil {
 		return 0, err
 	}
@@ -233,7 +238,7 @@ func (c *Client) Ingest(docs []IngestDoc) (int, error) {
 	}
 
 	url := fmt.Sprintf("%s/collections/%s/points?wait=true", c.qdrantURL, c.collection)
-	resp, err := c.sendJSON(http.MethodPut, url, map[string]any{"points": points})
+	resp, err := c.sendJSON(ctx, http.MethodPut, url, map[string]any{"points": points})
 	if err != nil {
 		return 0, fmt.Errorf("qdrant upsert request failed: %w", err)
 	}

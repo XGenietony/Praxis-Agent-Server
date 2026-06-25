@@ -7,6 +7,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
@@ -54,7 +55,7 @@ func main() {
 	var ragClient *rag.Client
 	if cfg.RagEnabled {
 		rc := rag.NewClient(client, &cfg)
-		if err := rc.EnsureCollection(); err != nil {
+		if err := rc.EnsureCollection(context.Background()); err != nil {
 			log.Printf("ERROR RAG: failed to ensure Qdrant collection: %v", err)
 			pm.Stop()
 			os.Exit(1)

@@ -13,6 +13,7 @@ Language: [中文](README.md) | English
 - Supports SSE response forwarding and Anthropic event stream conversion.
 - Injects default sampling parameters, truncates context, and applies lightweight thinking control.
 - Optionally enables Agentic RAG: the model can call the built-in `retrieve` tool, the server searches Qdrant, and retrieved context is fed back into the conversation.
+- Documents the integration boundary for ReAct and CodeAct agent methods.
 - Optionally starts frpc to expose the local service through a public tunnel.
 
 ## Requirements
@@ -120,9 +121,42 @@ Authorization: Bearer <API_KEY>
 x-api-key: <API_KEY>
 ```
 
+## Agent Methods
+
+This project is closer to an Agent Runtime Gateway / LLM protocol gateway: it handles protocol conversion, streaming semantics reconstruction, tool-call adaptation, RAG context injection, and backend governance. ReAct and CodeAct can both be used as upper-layer agent methods, but their boundaries inside this repository are different.
+
+### ReAct
+
+ReAct means a Reason + Act loop: the model reasons about the task, decides whether to call a tool, receives an observation, then continues reasoning and produces the final answer. In this project, ReAct is mainly represented through the tool-call protocol:
+
+```text
+User question -> model reasoning -> emits <tool_call> -> proxy parses tool call
+              -> execute retrieve / external tool -> feed back observation
+              -> model continues reasoning -> final answer
+```
+
+The built-in Agentic RAG path is a ReAct-style special case: Anthropic Messages requests receive a `retrieve` tool, the model emits a retrieval action when it needs knowledge-base context, and the proxy internally searches Qdrant before appending the results back into the conversation.
+
+### CodeAct
+
+CodeAct means the model expresses an action as code or a structured command, an external runner executes it, and the execution result is returned to the model. It is useful for file processing, data analysis, automation scripts, repository search, and batch operations.
+
+This repository does not currently include an arbitrary code execution sandbox, and it should not directly execute model-generated code. The recommended boundary is:
+
+```text
+Upper-layer agent generates code/command -> external safe runner executes it
+                                      -> stdout/stderr/result becomes tool result
+                                      -> this proxy handles protocol conversion,
+                                         streaming, and context transport
+```
+
+To integrate CodeAct, put code execution, permission control, timeouts, filesystem isolation, and audit logging in a separate tool service, then expose that service to the model through a standard tool schema. This proxy should focus on reliably passing tool calls and tool results between OpenAI and Anthropic protocols.
+
 ## Agentic RAG
 
 When RAG is enabled, Anthropic Messages requests automatically receive the built-in `retrieve` tool. If the model decides it needs knowledge-base context, it emits a `retrieve` tool call; the proxy internally calls the embeddings service and Qdrant, appends the matched passages back into the conversation, and lets the model continue answering. This retrieval loop is invisible to the client.
+
+`retrieve` is an internal tool and is never forwarded as a client-visible `tool_use`. If the model emits both `retrieve` and external tools in one turn, the proxy consumes retrieval first and asks the model to decide again with the new context. Streaming RAG requests reuse the final answer already produced by the internal loop and convert it to Anthropic SSE, so the backend is not asked to generate the answer a second time.
 
 RAG currently runs only on Anthropic Messages routes: `/v1/messages`, `/v1/message`, `/anthropic`, and `/anthropic/v1/messages`. The OpenAI `/v1/chat/completions` route is currently transparent forwarding and does not execute the internal retrieve loop.
 
@@ -197,6 +231,7 @@ All options can be set through CLI flags or environment variables. CLI flags tak
 | `--embed-dim` | `EMBED_DIM` | `1024` | Embedding vector dimension |
 | `--rag-top-k` | `RAG_TOP_K` | `5` | Number of chunks returned per retrieval |
 | `--rag-max-rounds` | `RAG_MAX_ROUNDS` | `3` | Maximum internal retrieval rounds per request |
+| `--rag-step-timeout-seconds` | `RAG_STEP_TIMEOUT_SECONDS` | `120` | Timeout in seconds for each internal RAG backend, embedding, or Qdrant retrieval step |
 | `--rag-chunk-size` | `RAG_CHUNK_SIZE` | `800` | Chunk size in characters when ingesting documents |
 | `--rag-chunk-overlap` | `RAG_CHUNK_OVERLAP` | `100` | Chunk overlap in characters |
 
@@ -219,6 +254,7 @@ All options can be set through CLI flags or environment variables. CLI flags tak
 ```text
 cmd/lmstudio-forward/   Application entrypoint: config parsing, dependency wiring, server startup
 internal/
+  agentloop/   Internal Agent loop: retrieve action detection, observation feedback, stop policy
   config/      Config parsing: flags, environment variables, defaults
   jsonx/       Dynamic JSON helpers
   language/    Token estimation, context truncation, complexity detection
