@@ -145,3 +145,100 @@ streamLoop:
 
 	log.Printf("INFO %s Anthropic stream completed in %v", clientIP, time.Since(start))
 }
+
+// streamCollectedAnthropic emits an already-collected OpenAI completion as
+// Anthropic SSE events. RAG uses this to avoid generating a second answer for
+// streaming clients after internal retrieve rounds have already produced the
+// final response.
+func (h *Handler) streamCollectedAnthropic(w http.ResponseWriter, openaiBytes []byte, model, clientIP string, start time.Time) error {
+	respBody, err := jsonx.Parse(openaiBytes)
+	if err != nil {
+		return err
+	}
+	msg := openaiToAnthropic(respBody, model)
+
+	stream.SetHeaders(w)
+	flusher, _ := w.(http.Flusher)
+	flush := func() {
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+	writeEvent := func(event any) {
+		w.Write([]byte(fmt.Sprintf("event: %s\ndata: %s\n\n", jsonx.GetStr(event, "type"), jsonx.MarshalString(event))))
+		flush()
+	}
+
+	inputTokens := jsonx.Get(jsonx.Get(msg, "usage"), "input_tokens")
+	if inputTokens == nil {
+		inputTokens = float64(0)
+	}
+	writeEvent(map[string]any{
+		"type": "message_start",
+		"message": map[string]any{
+			"id": jsonx.GetStr(msg, "id"), "type": "message", "role": "assistant",
+			"content": []any{}, "model": model,
+			"stop_reason": nil, "stop_sequence": nil,
+			"usage": map[string]any{"input_tokens": inputTokens, "output_tokens": 0},
+		},
+	})
+
+	for i, block := range jsonx.GetArr(msg, "content") {
+		btype := jsonx.GetStr(block, "type")
+		switch btype {
+		case "thinking":
+			writeEvent(map[string]any{
+				"type": "content_block_start", "index": i,
+				"content_block": map[string]any{"type": "thinking", "thinking": ""},
+			})
+			writeEvent(map[string]any{
+				"type": "content_block_delta", "index": i,
+				"delta": map[string]any{"type": "thinking_delta", "thinking": jsonx.GetStr(block, "thinking")},
+			})
+			writeEvent(map[string]any{"type": "content_block_stop", "index": i})
+		case "tool_use":
+			input := jsonx.Get(block, "input")
+			if input == nil {
+				input = map[string]any{}
+			}
+			writeEvent(map[string]any{
+				"type": "content_block_start", "index": i,
+				"content_block": map[string]any{
+					"type": "tool_use", "id": jsonx.GetStr(block, "id"),
+					"name": jsonx.GetStr(block, "name"), "input": map[string]any{},
+				},
+			})
+			writeEvent(map[string]any{
+				"type": "content_block_delta", "index": i,
+				"delta": map[string]any{"type": "input_json_delta", "partial_json": jsonx.MarshalString(input)},
+			})
+			writeEvent(map[string]any{"type": "content_block_stop", "index": i})
+		default:
+			writeEvent(map[string]any{
+				"type": "content_block_start", "index": i,
+				"content_block": map[string]any{"type": "text", "text": ""},
+			})
+			writeEvent(map[string]any{
+				"type": "content_block_delta", "index": i,
+				"delta": map[string]any{"type": "text_delta", "text": jsonx.GetStr(block, "text")},
+			})
+			writeEvent(map[string]any{"type": "content_block_stop", "index": i})
+		}
+	}
+
+	outputTokens := jsonx.Get(jsonx.Get(msg, "usage"), "output_tokens")
+	if outputTokens == nil {
+		outputTokens = float64(0)
+	}
+	writeEvent(map[string]any{
+		"type": "message_delta",
+		"delta": map[string]any{
+			"stop_reason": jsonx.GetStr(msg, "stop_reason"), "stop_sequence": nil,
+		},
+		"usage": map[string]any{"output_tokens": outputTokens},
+	})
+	writeEvent(map[string]any{"type": "message_stop"})
+
+	log.Printf("INFO %s Anthropic stream (collected RAG) completed in %v", clientIP, time.Since(start))
+	return nil
+}

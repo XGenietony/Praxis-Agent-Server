@@ -99,8 +99,14 @@ func (h *Handler) Messages(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		openaiBody = augmentedBody
-		if !isStream {
-			// Reuse the already-collected final answer; no extra generation.
+		// Reuse the already-collected final answer; no extra generation.
+		if isStream {
+			if err := h.streamCollectedAnthropic(w, finalBytes, model, clientIP, start); err != nil {
+				log.Printf("ERROR Invalid RAG stream response: %v", err)
+				anthropicError(w, http.StatusInternalServerError, "api_error", err.Error())
+			}
+			return
+		} else {
 			respBody, err := jsonx.Parse(finalBytes)
 			if err != nil {
 				log.Printf("ERROR Invalid response: %v", err)
@@ -112,7 +118,6 @@ func (h *Handler) Messages(w http.ResponseWriter, r *http.Request) {
 			w.Write(jsonx.Marshal(openaiToAnthropic(respBody, model)))
 			return
 		}
-		// Stream branch falls through with the context-augmented body.
 	}
 
 	if isStream {
