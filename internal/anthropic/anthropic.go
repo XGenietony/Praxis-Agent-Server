@@ -46,6 +46,14 @@ type streamState struct {
 	thinkingStarted   bool
 	textStarted       bool
 	blockIndex        int
+	toolOrdinal       int
+	nativeTools       map[int]*nativeToolDelta
 	pendingStopReason string // "" = none
 	finished          bool
+}
+
+type nativeToolDelta struct {
+	id        string
+	name      string
+	arguments string
 }

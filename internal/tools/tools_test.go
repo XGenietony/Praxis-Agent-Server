@@ -104,3 +104,26 @@ func TestAnthropicToOpenAIBasic(t *testing.T) {
 		t.Fatalf("user message wrong: %v", msgs[1])
 	}
 }
+
+func TestEnsureToolCallIDIsSharedAndDeterministic(t *testing.T) {
+	if got := EnsureToolCallID("provider-id", 7); got != "provider-id" {
+		t.Fatalf("want provider ID preserved, got %q", got)
+	}
+	if got := EnsureToolCallID("", 7); got != "toolu_local_7" {
+		t.Fatalf("want deterministic local ID, got %q", got)
+	}
+}
+
+func TestStreamParserUsesSharedToolCallIDFallback(t *testing.T) {
+	p := NewStreamParser()
+	events := p.Feed(`<tool_call>{"name":"retrieve","arguments":{"query":"x"}}</tool_call>`)
+	for _, ev := range events {
+		if ev.Kind == EventCall {
+			if ev.Call.ID != "toolu_local_0" {
+				t.Fatalf("want shared fallback ID, got %q", ev.Call.ID)
+			}
+			return
+		}
+	}
+	t.Fatal("expected tool call event")
+}

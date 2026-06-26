@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"lmstudio-forward/internal/config"
@@ -48,11 +49,14 @@ func killPort(port int) {
 // timeoutSecs, returning true as soon as the request succeeds.
 func waitForHealth(port int, path string, timeoutSecs int) bool {
 	url := fmt.Sprintf("http://127.0.0.1:%d%s", port, path)
+	client := &http.Client{Timeout: 2 * time.Second}
 	for i := 0; i < timeoutSecs; i++ {
-		resp, err := http.Get(url)
+		resp, err := client.Get(url)
 		if err == nil {
 			resp.Body.Close()
-			return true
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				return true
+			}
 		}
 		if i%10 == 9 {
 			log.Printf("INFO Still loading... (%ds)", i+1)
@@ -156,6 +160,7 @@ func (pm *Manager) Start(cfg *config.Config) error {
 		log.Printf("INFO Starting frpc tunnel...")
 		logFile, err := os.Create("/tmp/frpc.log")
 		if err != nil {
+			pm.Stop()
 			return err
 		}
 
@@ -163,11 +168,17 @@ func (pm *Manager) Start(cfg *config.Config) error {
 		cmd.Stdout = logFile
 		cmd.Stderr = os.Stderr
 		if err := cmd.Start(); err != nil {
+			pm.Stop()
 			return fmt.Errorf("Failed to start frpc: %w", err)
 		}
 		pm.frpcCmd = cmd
 		log.Printf("INFO frpc started (PID %d)", cmd.Process.Pid)
+
 		time.Sleep(2 * time.Second)
+		if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
+			pm.Stop()
+			return fmt.Errorf("frpc exited during startup: %w", err)
+		}
 		log.Printf("INFO frpc tunnel ready")
 	}
 

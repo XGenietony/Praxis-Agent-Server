@@ -2,8 +2,8 @@ package anthropic
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"time"
@@ -27,10 +27,15 @@ func (h *Handler) Messages(w http.ResponseWriter, r *http.Request) {
 	clientIP := proxy.GetClientIP(r)
 	start := time.Now()
 
-	bodyBytes, err := io.ReadAll(r.Body)
+	bodyBytes, err := proxy.ReadLimitedBody(w, r, s.Config.MaxRequestBodyBytes)
 	if err != nil {
 		log.Printf("ERROR Failed to read request body: %v", err)
-		anthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			anthropicError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "request body too large")
+		} else {
+			anthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		}
 		return
 	}
 
@@ -48,6 +53,8 @@ func (h *Handler) Messages(w http.ResponseWriter, r *http.Request) {
 
 	// Convert Anthropic → OpenAI
 	openaiBody := tools.AnthropicRequestToOpenAI(anthropicReq)
+
+	nonRagBody := cloneJSONMap(openaiBody)
 
 	// Agentic RAG: inject the built-in `retrieve` tool so the model can request retrieval.
 	if s.Rag != nil {
@@ -93,37 +100,51 @@ func (h *Handler) Messages(w http.ResponseWriter, r *http.Request) {
 	// Agentic RAG: consume internal `retrieve` rounds before responding to the client.
 	if s.Rag != nil {
 		augmentedBody, finalBytes, err := h.resolveRagRounds(r.Context(), url, s.Rag, openaiBody, s.Config.RagMaxRounds)
-		if err != nil {
-			log.Printf("ERROR RAG loop failed: %v", err)
-			anthropicError(w, http.StatusBadGateway, "api_error", "RAG loop failed: "+err.Error())
-			return
-		}
-		openaiBody = augmentedBody
-		// Reuse the already-collected final answer; no extra generation.
-		if isStream {
-			if err := h.streamCollectedAnthropic(r.Context(), w, finalBytes, model, clientIP, start); err != nil {
-				log.Printf("ERROR Invalid RAG stream response: %v", err)
-				anthropicError(w, http.StatusInternalServerError, "api_error", err.Error())
+		if err == nil {
+			openaiBody = augmentedBody
+			// Reuse the already-collected final answer; no extra generation.
+			if isStream {
+				if err := h.streamCollectedAnthropic(r.Context(), w, finalBytes, model, clientIP, start); err != nil {
+					log.Printf("ERROR Invalid RAG stream response: %v", err)
+					anthropicError(w, http.StatusInternalServerError, "api_error", err.Error())
+				}
+				return
 			}
-			return
-		} else {
 			respBody, err := jsonx.Parse(finalBytes)
 			if err != nil {
 				log.Printf("ERROR Invalid response: %v", err)
 				anthropicError(w, http.StatusInternalServerError, "api_error", err.Error())
 				return
 			}
+			converted, err := openaiToAnthropicStrict(respBody, model)
+			if err != nil {
+				anthropicError(w, http.StatusBadGateway, "api_error", "Backend response conversion failed: "+err.Error())
+				return
+			}
 			log.Printf("INFO %s Anthropic non-stream (RAG) completed in %v", clientIP, time.Since(start))
-			w.Header().Set("Content-Type", "application/json")
-			w.Write(jsonx.Marshal(openaiToAnthropic(respBody, model)))
+			jsonx.WriteJSON(w, http.StatusOK, converted)
 			return
 		}
+
+		log.Printf("ERROR RAG loop failed: %v", err)
+		if s.Config.RagFailureMode != "open" {
+			anthropicError(w, http.StatusBadGateway, "api_error", "RAG loop failed: "+err.Error())
+			return
+		}
+		log.Printf("WARN RAG failure mode is open; retrying without internal retrieval")
+		openaiBody = nonRagBody
+		hasTools = tools.TransformRequest(openaiBody)
 	}
 
 	if isStream {
 		openaiBody["stream"] = true
 		openaiBody["stream_options"] = map[string]any{"include_usage": true}
-		h.streamAnthropic(r.Context(), w, url, jsonx.Marshal(openaiBody), model, clientIP, start)
+		openaiBytes, err := jsonx.MarshalStrict(openaiBody)
+		if err != nil {
+			anthropicError(w, http.StatusInternalServerError, "api_error", "failed to marshal backend request")
+			return
+		}
+		h.streamAnthropic(r.Context(), w, url, openaiBytes, model, clientIP, start)
 		return
 	}
 
@@ -131,7 +152,12 @@ func (h *Handler) Messages(w http.ResponseWriter, r *http.Request) {
 	openaiBody["stream"] = true
 	openaiBody["stream_options"] = map[string]any{"include_usage": true}
 
-	req, err := http.NewRequestWithContext(r.Context(), "POST", url, bytes.NewReader(jsonx.Marshal(openaiBody)))
+	openaiBytes, err := jsonx.MarshalStrict(openaiBody)
+	if err != nil {
+		anthropicError(w, http.StatusInternalServerError, "api_error", "failed to marshal backend request")
+		return
+	}
+	req, err := http.NewRequestWithContext(r.Context(), "POST", url, bytes.NewReader(openaiBytes))
 	if err != nil {
 		log.Printf("ERROR Cannot connect to LM Studio: %v", err)
 		anthropicError(w, http.StatusBadGateway, "api_error", "Cannot connect to backend: "+err.Error())
@@ -162,7 +188,27 @@ func (h *Handler) Messages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	converted, err := openaiToAnthropicStrict(respBody, model)
+	if err != nil {
+		anthropicError(w, http.StatusBadGateway, "api_error", "Backend response conversion failed: "+err.Error())
+		return
+	}
+
 	log.Printf("INFO %s Anthropic non-stream completed in %v", clientIP, time.Since(start))
-	w.Header().Set("Content-Type", "application/json")
-	w.Write(jsonx.Marshal(openaiToAnthropic(respBody, model)))
+	jsonx.WriteJSON(w, http.StatusOK, converted)
+}
+
+func cloneJSONMap(src map[string]any) map[string]any {
+	b, err := jsonx.MarshalStrict(src)
+	if err != nil {
+		return map[string]any{}
+	}
+	parsed, err := jsonx.Parse(b)
+	if err != nil {
+		return map[string]any{}
+	}
+	if out, ok := parsed.(map[string]any); ok {
+		return out
+	}
+	return map[string]any{}
 }

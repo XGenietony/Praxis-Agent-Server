@@ -4,8 +4,8 @@ package openai
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -43,11 +43,17 @@ func (h *Handler) Forward(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("INFO %s %s /v1/%s", clientIP, method, path)
 
-	bodyBytes, err := io.ReadAll(r.Body)
+	bodyBytes, err := proxy.ReadLimitedBody(w, r, s.Config.MaxRequestBodyBytes)
 	if err != nil {
 		log.Printf("ERROR Failed to read request body: %v", err)
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte("Failed to read request body"))
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			w.Write([]byte("Request body too large"))
+		} else {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte("Failed to read request body"))
+		}
 		return
 	}
 	r.Body.Close()
@@ -163,7 +169,5 @@ func (h *Handler) ListModels(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	w.Write(jsonx.Marshal(models))
+	jsonx.WriteJSON(w, http.StatusOK, models)
 }
