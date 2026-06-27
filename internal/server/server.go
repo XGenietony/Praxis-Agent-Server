@@ -3,8 +3,9 @@
 package server
 
 import (
+	"context"
+	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 
@@ -50,12 +51,9 @@ func (s *Server) Routes() *http.ServeMux {
 // handleHealth probes the backend /health endpoint and reports overall status.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	url := fmt.Sprintf("http://127.0.0.1:%d/health", s.state.Config.BackendPort)
-	backendOK := false
-	resp, err := s.state.HTTPClient.Get(url)
-	if err == nil {
-		backendOK = true
-		resp.Body.Close()
-	}
+	ctx, cancel := context.WithTimeout(r.Context(), s.state.Config.BackendHealthTimeout())
+	defer cancel()
+	backendOK := probeHTTP(ctx, s.state.HTTPClient, url)
 
 	status := "degraded"
 	if backendOK {
@@ -66,8 +64,20 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"status":  status,
 		"backend": backendOK,
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.Write(jsonx.Marshal(body))
+	jsonx.WriteJSON(w, http.StatusOK, body)
+}
+
+func probeHTTP(ctx context.Context, client *http.Client, url string) bool {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return false
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode >= 200 && resp.StatusCode < 300
 }
 
 // handleRagIngest ingests documents into the RAG store. Body shape:
@@ -83,9 +93,13 @@ func (s *Server) handleRagIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	raw, err := io.ReadAll(r.Body)
+	raw, err := proxy.ReadLimitedBody(w, r, s.state.Config.MaxRequestBodyBytes)
 	if err != nil {
-		http.Error(w, "failed to read body", http.StatusBadRequest)
+		if errors.As(err, new(*http.MaxBytesError)) {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+		} else {
+			http.Error(w, "failed to read body", http.StatusBadRequest)
+		}
 		return
 	}
 	parsed, err := jsonx.Parse(raw)
@@ -110,6 +124,5 @@ func (s *Server) handleRagIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.Write(jsonx.Marshal(map[string]any{"ingested_chunks": n}))
+	jsonx.WriteJSON(w, http.StatusOK, map[string]any{"ingested_chunks": n})
 }

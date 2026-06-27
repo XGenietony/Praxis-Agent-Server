@@ -11,6 +11,8 @@
 //	jsonrepair.go    best-effort JSON repair for small-model output
 package tools
 
+import "strconv"
+
 // ToolCall is a parsed tool invocation. ID == "" means no id was provided.
 type ToolCall struct {
 	Name      string
@@ -42,4 +44,13 @@ func orDefault(s, def string) string {
 		return def
 	}
 	return s
+}
+
+// EnsureToolCallID preserves a model/provider-supplied ID and otherwise creates
+// a deterministic local ID shared by batch and streaming tool parsing paths.
+func EnsureToolCallID(id string, index int) string {
+	if id != "" {
+		return id
+	}
+	return "toolu_local_" + strconv.Itoa(index)
 }

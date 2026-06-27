@@ -165,6 +165,9 @@ func (r Runner) appendRetrieveObservations(ctx context.Context, body map[string]
 		}
 		log.Printf("INFO RAG round %d: query='%s' hits=%d", round+1, query, len(chunks))
 		result := rag.FormatChunks(chunks)
+		if err != nil {
+			result = "[retrieve error]\nThe retrieval backend failed for this query: " + err.Error() + "\nContinue with the available conversation context, and mention that retrieval was unavailable if it affects confidence."
+		}
 		if messages := jsonx.AsArr(body["messages"]); messages != nil {
 			messages = append(messages, map[string]any{
 				"role":    "assistant",

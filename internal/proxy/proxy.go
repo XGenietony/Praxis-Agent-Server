@@ -3,6 +3,8 @@
 package proxy
 
 import (
+	"crypto/subtle"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -43,18 +45,39 @@ func GetClientIP(r *http.Request) string {
 // disables auth (always authorized). Otherwise the request must carry either
 // "Authorization: Bearer <key>" or "x-api-key: <key>".
 func CheckAPIKey(r *http.Request, expectedKey string) bool {
-	if expectedKey == "" {
+	expected := strings.TrimSpace(expectedKey)
+	if expected == "" {
 		return true
 	}
-	if auth := r.Header.Get("Authorization"); auth != "" {
-		if auth == "Bearer "+expectedKey {
-			return true
-		}
+	if token := bearerToken(r.Header.Get("Authorization")); token != "" && secureCompare(token, expected) {
+		return true
 	}
-	if key := r.Header.Get("x-api-key"); key != "" {
-		if key == expectedKey {
-			return true
-		}
+	if token := strings.TrimSpace(r.Header.Get("x-api-key")); token != "" && secureCompare(token, expected) {
+		return true
 	}
 	return false
+}
+
+func bearerToken(header string) string {
+	parts := strings.Fields(header)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+		return ""
+	}
+	return strings.TrimSpace(parts[1])
+}
+
+func secureCompare(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
+
+// ReadLimitedBody caps request bodies before reading them fully into memory.
+func ReadLimitedBody(w http.ResponseWriter, r *http.Request, maxBytes int64) ([]byte, error) {
+	if maxBytes <= 0 {
+		return io.ReadAll(r.Body)
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+	return io.ReadAll(r.Body)
 }

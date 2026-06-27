@@ -1,7 +1,7 @@
 package anthropic
 
 import (
-	"fmt"
+	"errors"
 
 	"lmstudio-forward/internal/jsonx"
 	"lmstudio-forward/internal/tools"
@@ -9,10 +9,15 @@ import (
 
 // openaiToAnthropic converts an OpenAI response to Anthropic format (non-streaming).
 func openaiToAnthropic(resp any, model string) any {
+	out, _ := openaiToAnthropicStrict(resp, model)
+	return out
+}
+
+func openaiToAnthropicStrict(resp any, model string) (any, error) {
 	choices := jsonx.AsArr(jsonx.Get(resp, "choices"))
-	var choice any
-	if len(choices) > 0 {
-		choice = choices[0]
+	choice, err := primaryChoice(choices)
+	if err != nil {
+		return nil, err
 	}
 	message := jsonx.Get(choice, "message")
 	usage := jsonx.Get(resp, "usage")
@@ -44,10 +49,7 @@ func openaiToAnthropic(resp any, model string) any {
 				if err != nil {
 					input = map[string]any{}
 				}
-				id := fmt.Sprintf("toolu_%04x", i)
-				if v, ok := jsonx.AsStr(jsonx.Get(tc, "id")); ok {
-					id = v
-				}
+				id := tools.EnsureToolCallID(jsonx.GetStr(tc, "id"), i)
 				contentBlocks = append(contentBlocks, map[string]any{
 					"type": "tool_use", "id": id, "name": name, "input": input,
 				})
@@ -89,7 +91,7 @@ func openaiToAnthropic(resp any, model string) any {
 		"stop_reason":   stopReason,
 		"stop_sequence": nil,
 		"usage":         map[string]any{"input_tokens": promptTokens, "output_tokens": completionTokens},
-	}
+	}, nil
 }
 
 // openaiChunkToAnthropic converts a single OpenAI SSE chunk to Anthropic SSE events.
@@ -116,7 +118,11 @@ func openaiChunkToAnthropic(chunk any, state *streamState, model string, toolPar
 	choices := jsonx.AsArr(jsonx.Get(chunk, "choices"))
 	var choice any
 	if len(choices) > 0 {
-		choice = choices[0]
+		var choiceErr error
+		choice, choiceErr = primaryChoice(choices)
+		if choiceErr != nil {
+			return events
+		}
 	}
 	delta := jsonx.Get(choice, "delta")
 
@@ -146,8 +152,21 @@ func openaiChunkToAnthropic(chunk any, state *streamState, model string, toolPar
 		}
 	}
 
+	// Native OpenAI streaming tool calls are incremental by index. Accumulate
+	// their ID/name/arguments fragments and emit Anthropic tool_use blocks once
+	// the backend reports tool_calls as the finish reason.
+	if toolCalls := jsonx.AsArr(jsonx.Get(delta, "tool_calls")); len(toolCalls) > 0 {
+		accumulateNativeToolDeltas(state, toolCalls)
+	}
+
 	// Finish reason
 	if finish, ok := jsonx.AsStr(jsonx.Get(choice, "finish_reason")); ok && finish != "" {
+		if finish == "tool_calls" {
+			for _, tc := range drainNativeToolDeltas(state) {
+				events = applyToolEvent(tools.StreamEvent{Kind: tools.EventCall, Call: tc}, state, events)
+			}
+		}
+
 		// Flush tool parser
 		for _, te := range toolParser.Flush() {
 			events = applyToolEvent(te, state, events)
@@ -230,10 +249,8 @@ func applyToolEvent(te tools.StreamEvent, state *streamState, events []any) []an
 		if err != nil {
 			input = map[string]any{}
 		}
-		id := tc.ID
-		if id == "" {
-			id = fmt.Sprintf("toolu_%04x", state.blockIndex)
-		}
+		id := tools.EnsureToolCallID(tc.ID, state.toolOrdinal)
+		state.toolOrdinal++
 		events = append(events, map[string]any{
 			"type": "content_block_start", "index": state.blockIndex,
 			"content_block": map[string]any{"type": "tool_use", "id": id, "name": tc.Name, "input": map[string]any{}},
@@ -262,4 +279,60 @@ func ensureTextBlock(state *streamState, events []any) []any {
 		})
 	}
 	return events
+}
+
+var (
+	errNoChoices       = errors.New("backend returned no choices")
+	errMultipleChoices = errors.New("backend returned multiple choices")
+)
+
+func primaryChoice(choices []any) (any, error) {
+	if len(choices) == 0 {
+		return nil, errNoChoices
+	}
+	if len(choices) > 1 {
+		return nil, errMultipleChoices
+	}
+	return choices[0], nil
+}
+
+func accumulateNativeToolDeltas(state *streamState, toolCalls []any) {
+	if state.nativeTools == nil {
+		state.nativeTools = map[int]*nativeToolDelta{}
+	}
+	for _, tc := range toolCalls {
+		idx := 0
+		if rawIdx, ok := jsonx.GetNum(tc, "index"); ok {
+			idx = int(rawIdx)
+		}
+		cur := state.nativeTools[idx]
+		if cur == nil {
+			cur = &nativeToolDelta{}
+			state.nativeTools[idx] = cur
+		}
+		if id := jsonx.GetStr(tc, "id"); id != "" {
+			cur.id = id
+		}
+		fn := jsonx.Get(tc, "function")
+		if name := jsonx.GetStr(fn, "name"); name != "" {
+			cur.name = name
+		}
+		cur.arguments += jsonx.GetStr(fn, "arguments")
+	}
+}
+
+func drainNativeToolDeltas(state *streamState) []tools.ToolCall {
+	if len(state.nativeTools) == 0 {
+		return nil
+	}
+	calls := make([]tools.ToolCall, 0, len(state.nativeTools))
+	for i := 0; i < len(state.nativeTools); i++ {
+		cur := state.nativeTools[i]
+		if cur == nil || cur.name == "" {
+			continue
+		}
+		calls = append(calls, tools.ToolCall{ID: cur.id, Name: cur.name, Arguments: cur.arguments})
+	}
+	state.nativeTools = nil
+	return calls
 }

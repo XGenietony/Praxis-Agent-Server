@@ -212,7 +212,7 @@ func TestRunExhaustedOnlyRetrieveReturnsError(t *testing.T) {
 	}
 }
 
-func TestRunSearchFailureContinuesWithEmptyObservation(t *testing.T) {
+func TestRunSearchFailureContinuesWithExplicitErrorObservation(t *testing.T) {
 	backend := &fakeBackend{responses: [][]byte{openAITools(retrieveCall("alpha")), openAIText("answer")}}
 	retriever := &fakeRetriever{err: errors.New("search down")}
 	body, _, err := Runner{Backend: backend, Retriever: retriever, MaxRounds: 3}.Run(context.Background(), baseBody())
@@ -220,8 +220,8 @@ func TestRunSearchFailureContinuesWithEmptyObservation(t *testing.T) {
 		t.Fatalf("Run should degrade search errors: %v", err)
 	}
 	messages := jsonx.AsArr(body["messages"])
-	if got := jsonx.GetStr(messages[len(messages)-1], "content"); !strings.Contains(got, "No relevant documents") {
-		t.Fatalf("observation should be empty-result text, got %q", got)
+	if got := jsonx.GetStr(messages[len(messages)-1], "content"); !strings.Contains(got, "[retrieve error]") || !strings.Contains(got, "search down") {
+		t.Fatalf("observation should describe retrieval error, got %q", got)
 	}
 }
 
@@ -250,4 +250,25 @@ func mustParse(t *testing.T, b []byte) any {
 		t.Fatalf("parse response: %v", err)
 	}
 	return v
+}
+
+func TestRunAddsExplicitRetrieveErrorObservation(t *testing.T) {
+	body := map[string]any{"messages": []any{map[string]any{"role": "user", "content": "q"}}}
+	backend := &fakeBackend{responses: [][]byte{
+		[]byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"retrieve","arguments":"{\"query\":\"q\"}"}}]}}]}`),
+		[]byte(`{"choices":[{"message":{"content":"done"},"finish_reason":"stop"}]}`),
+	}}
+	runner := Runner{Backend: backend, Retriever: &fakeRetriever{err: errors.New("qdrant down")}, MaxRounds: 1}
+	augmented, _, err := runner.Run(context.Background(), body)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	messages := jsonx.AsArr(augmented["messages"])
+	if len(messages) < 3 {
+		t.Fatalf("want retrieval observation appended, got %#v", messages)
+	}
+	obs := jsonx.GetStr(messages[len(messages)-2], "content")
+	if !strings.Contains(obs, "[retrieve error]") || !strings.Contains(obs, "qdrant down") {
+		t.Fatalf("want explicit retrieve error observation, got %q", obs)
+	}
 }

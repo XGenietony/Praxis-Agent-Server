@@ -1,7 +1,6 @@
 package tools
 
 import (
-	"fmt"
 	"strings"
 
 	"lmstudio-forward/internal/jsonx"
@@ -42,10 +41,7 @@ func TransformResponse(respBody []byte) []byte {
 
 		tcArray := make([]any, 0, len(toolCalls))
 		for i, tc := range toolCalls {
-			id := tc.ID
-			if id == "" {
-				id = fmt.Sprintf("call_%d", i)
-			}
+			id := EnsureToolCallID(tc.ID, i)
 			tcArray = append(tcArray, map[string]any{
 				"id":       id,
 				"type":     "function",

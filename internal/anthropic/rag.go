@@ -34,7 +34,11 @@ func (h *Handler) backendOnce(ctx context.Context, url string, body map[string]a
 	probe["stream"] = true
 	probe["stream_options"] = map[string]any{"include_usage": true}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonx.Marshal(probe)))
+	probeBytes, err := jsonx.MarshalStrict(probe)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(probeBytes))
 	if err != nil {
 		return nil, err
 	}

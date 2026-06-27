@@ -15,6 +15,8 @@ package jsonx
 
 import (
 	"encoding/json"
+	"log"
+	"net/http"
 	"strconv"
 )
 
@@ -47,6 +49,29 @@ func MarshalPretty(v any) []byte {
 		return nil
 	}
 	return b
+}
+
+// MarshalStrict marshals v and returns the underlying encoding error. Use this
+// at protocol and HTTP boundaries where silent empty output would corrupt the
+// response.
+func MarshalStrict(v any) ([]byte, error) {
+	return json.Marshal(v)
+}
+
+// WriteJSON writes a JSON response, falling back to a minimal 500 response when
+// marshaling fails before any bytes are sent.
+func WriteJSON(w http.ResponseWriter, status int, v any) {
+	b, err := MarshalStrict(v)
+	if err != nil {
+		log.Printf("ERROR JSON marshal failed: %v", err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"failed to marshal JSON response"}`))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = w.Write(b)
 }
 
 // AsObj returns v as a JSON object, or nil if v is not an object.

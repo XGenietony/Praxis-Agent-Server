@@ -31,6 +31,10 @@ func main() {
 	log.SetFlags(log.LstdFlags)
 
 	cfg := config.Parse()
+	if err := cfg.Validate(); err != nil {
+		log.Printf("ERROR invalid configuration: %v", err)
+		os.Exit(1)
+	}
 	log.Printf("INFO LMStudio Forward v%s", appVersion)
 
 	// Start backend + frpc child processes.
@@ -81,23 +85,35 @@ func main() {
 	}
 
 	httpServer := &http.Server{
-		Addr:    addr,
-		Handler: srv.Routes(),
+		Addr:              addr,
+		Handler:           srv.Routes(),
+		ReadHeaderTimeout: cfg.ServerReadHeaderTimeout(),
+		IdleTimeout:       cfg.ServerIdleTimeout(),
 	}
 
-	// Graceful shutdown on SIGINT/SIGTERM: stop child processes then exit.
+	// Graceful shutdown on SIGINT/SIGTERM: drain HTTP requests, then stop child processes.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	serveErr := make(chan error, 1)
 	go func() {
-		<-sigCh
-		pm.Stop()
-		_ = httpServer.Close()
-		os.Exit(0)
+		serveErr <- httpServer.ListenAndServe()
 	}()
 
-	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Printf("ERROR server error: %v", err)
+	select {
+	case sig := <-sigCh:
+		log.Printf("INFO received %s, shutting down", sig)
+		ctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout())
+		defer cancel()
+		if err := httpServer.Shutdown(ctx); err != nil {
+			log.Printf("WARN graceful shutdown timed out: %v", err)
+			_ = httpServer.Close()
+		}
 		pm.Stop()
-		os.Exit(1)
+	case err := <-serveErr:
+		if err != nil && err != http.ErrServerClosed {
+			log.Printf("ERROR server error: %v", err)
+			pm.Stop()
+			os.Exit(1)
+		}
 	}
 }

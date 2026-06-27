@@ -1,7 +1,6 @@
 package tools
 
 import (
-	"fmt"
 	"strings"
 	"unicode/utf8"
 
@@ -42,10 +41,7 @@ func (p *StreamParser) Feed(text string) []StreamEvent {
 							arguments = "{}"
 						}
 					}
-					id := jsonx.GetStr(parsed, "call_id")
-					if id == "" {
-						id = fmt.Sprintf("toolu_%04x", p.toolIndex)
-					}
+					id := EnsureToolCallID(jsonx.GetStr(parsed, "call_id"), p.toolIndex)
 					p.toolIndex++
 					events = append(events, StreamEvent{Kind: EventCall, Call: ToolCall{Name: name, Arguments: arguments, ID: id}})
 				}
