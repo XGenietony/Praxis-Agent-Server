@@ -4,6 +4,9 @@
 *.test
 *.out
 
+# Rust/Cargo build output
+target/
+
 # macOS
 .DS_Store
 
